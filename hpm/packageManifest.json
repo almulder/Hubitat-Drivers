@@ -1,0 +1,70 @@
+{
+  "packageName": "YoLink Local Hub ↔ Hubitat (Local-only)",
+  "author": "Albert Mulder",
+  "version": "1.2.1",
+  "minimumHEVersion": "2.4.0",
+  "dateReleased": "2025-12-22",
+  "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Yolink%20Local%20Hub",
+  "communityLink": "https://community.hubitat.com/t/yolink-local-hub-hubitat-local-only-app-drivers-beta/156494",
+  "releaseNotes": "HPM packaging: App + MQTT required; device drivers optional/selectable.",
+  "tags": [
+    "Integration",
+    "YoLink",
+    "Local",
+    "MQTT"
+  ],
+  "apps": [
+    {
+      "id": "7f59a74f-3592-4315-9607-40ac8e15c4a2",
+      "name": "YoLink™ Device Local Service",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/App/YoLink%20Device%20Local%20Service.groovy",
+      "required": true,
+      "oauth": false
+    }
+  ],
+  "drivers": [
+    {
+      "id": "e7030b0c-8727-4816-936c-f39bb2ccc42d",
+      "name": "YoLink MQTT Listener Device Local",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Drivers/YoLink%20MQTT%20Listener%20Device%20Local.groovy",
+      "required": true
+    },
+    {
+      "id": "20dd5763-785e-48a2-9f75-86f20f197a93",
+      "name": "YoLink DoorSensor Device Local",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Drivers/YoLink%20DoorSensor%20Device%20Local.groovy",
+      "required": false
+    },
+    {
+      "id": "97bf261e-406e-4e68-a3f6-6ab923a01398",
+      "name": "YoLink LeakSensor Device Local",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Drivers/YoLink%20LeakSensor%20Device%20Local.groovy",
+      "required": false
+    },
+    {
+      "id": "12b748ed-2042-4d8d-94fe-0a57a4dd3568",
+      "name": "YoLink MotionSensor Device Local",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Drivers/YoLink%20MotionSensor%20Device%20Local.groovy",
+      "required": false
+    },
+    {
+      "id": "0df3dbac-3621-4447-b3ac-1c151f7082e1",
+      "name": "YoLink PowerFailureAlarm Device Local",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Drivers/YoLink%20PowerFailureAlarm%20Device%20Local.groovy",
+      "required": false
+    },
+    {
+      "id": "8f3a6e5f-14dd-4f8b-9a50-01f56fe11d6b",
+      "name": "YoLink THSensor Device Local",
+      "namespace": "Almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Drivers/YoLink%20THSensor%20Device%20Local.groovy",
+      "required": false
+    }
+  ]
+}
