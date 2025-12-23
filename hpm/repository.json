@@ -3,7 +3,7 @@
   "gitHubUrl": "https://github.com/almulder/Hubitat-Drivers/tree/main",
   "packages": [
     {
-      "name": "YoLink Local Hub ↔ Hubitat (Local-only)",
+      "name": "YoLink™ Local Hub Connector",
       "category": "Integrations",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/hpm/packageManifest.json",
       "description": "YoLink Local Hub integration. App + MQTT required; device drivers optional/selectable."
