@@ -7,9 +7,8 @@
   "communityLink": "https://community.hubitat.com/t/yolink-local-hub-hubitat-local-only-app-drivers-beta/156494",
   "releaseNotes": "HPM packaging: App + MQTT required; device drivers optional/selectable.",
   "tags": [
-    "Integration",
-    "YoLink",
-    "Local",
+    "MQTT",
+    "Misc. Devices"
   ],
   "apps": [
     {
