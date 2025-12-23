@@ -6,6 +6,10 @@
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Yolink%20Local%20Hub",
   "communityLink": "https://community.hubitat.com/t/yolink-local-hub-hubitat-local-only-app-drivers-beta/156494",
   "releaseNotes": "HPM packaging: App + MQTT required; device drivers optional/selectable.",
+   "tags": [
+    "MQTT",
+    "Misc. Devices"
+  ],
   "apps": [
     {
       "id": "7f59a74f-3592-4315-9607-40ac8e15c4a2",
