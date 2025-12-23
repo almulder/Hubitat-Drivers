@@ -61,7 +61,7 @@
     },
     {
       "id": "8f3a6e5f-14dd-4f8b-9a50-01f56fe11d6b",
-      "name": "YoLink THSensor Device Local",
+      "name": "YoLink™ THSensor Device Local",
       "namespace": "Almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Yolink%20Local%20Hub/Drivers/YoLink%20THSensor%20Device%20Local.groovy",
       "required": false,
