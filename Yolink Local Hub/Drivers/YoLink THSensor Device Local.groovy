@@ -12,7 +12,7 @@ import groovy.json.JsonSlurper
 def clientVersion() { return "1.1.2-local" }
 def copyright()     { return "© 2025 Albert Mulder" }
 def bold(t)         { return "<strong>$t</strong>" }
-def driverName()    { return "YoLink THSensor (Local API Edition)"}
+def driverName()    { return "YoLink™ THSensor (Local API Edition)"}
 
 /* ============================ Preferences ============================ */
 preferences {
