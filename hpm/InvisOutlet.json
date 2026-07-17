@@ -2,7 +2,7 @@
   "packageName": "INTECULAR™ MQTT Connector",
   "author": "Albert Mulder",
   "minimumHEVersion": "2.2.9",
-  "dateReleased": "2026-0716",
+  "dateReleased": "2026-07-15",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Intecular",
   "communityLink": "https://community.hubitat.com/t/intecular-mqtt-connector-app-drivers-beta/165173",
   "releaseNotes": "HPM packaging: App + MQTT required; device drivers optional/selectable.",
