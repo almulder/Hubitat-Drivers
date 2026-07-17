@@ -12,7 +12,6 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expressed or implied. 
  * 
- * 1.2.1 - Updated for HPM
  * 1.2.0 - Support for Motion Devices
  * 1.1.1 - Moved Repo for better Forking and updated Links
  * 1.1.0 - Initial Working Version
@@ -22,7 +21,7 @@ import groovy.json.JsonOutput
 import java.net.URLEncoder
 import groovy.transform.Field
 
-private def get_APP_VERSION() {return "1.2.1"}
+private def get_APP_VERSION() {return "1.2.0"}
 private def copyright() {return "<br>© 2025-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved."}
 private def get_APP_NAME() {return "YoLink Device Local Service"}
 
@@ -35,10 +34,7 @@ definition(
     oauth: false,    
     category: "YoLink",
     singleInstance: true,
-    iconUrl: "${getImagePath()}yolink.png",
-    iconX2Url: "${getImagePath()}yolink.png",
-    importUrl: "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/App/YoLink%20Device%20Local%20Service.groovy"
-
+    importUrl: "https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/YoLink_Device_Service.groovy"
 )
 
 preferences {
@@ -59,7 +55,8 @@ String errData
 def about() {
     dynamicPage(name: "about", title: pageTitle("About"), uninstall: true) {
         section("") {
-            paragraph image:"${getImagePath()}yolink.png", boldTitle("${get_APP_NAME()} - Version ${get_APP_VERSION()}")
+            paragraph "<img src='${getImagePath()}yolink.png' alt='YoLink' style='max-width: 15%; height: auto;'/>"
+            paragraph boldTitle("${get_APP_NAME()} - Version ${get_APP_VERSION()}")
             paragraph boldTitle("This app connects your YoLink devices to Hubitat via MQTT & the YoLink Local Hub.")  
             paragraph blueTitle("The app is neither developed, endorsed, or associated with YoLink or YoSmart, Inc." + 
             "</br>Provided 'AS IS', without warranties or conditions of any kind, either expressed or implied.") 
@@ -99,32 +96,32 @@ def credentials() {
                 paragraph "<u><b style='font-size: 24px;'>Obtaining Your User Credentials</b></u>"
                 paragraph ""
                 paragraph "<b>◉</b>  Please open your YoLink mobile app, navigate to the <b>YoLink Local Hub (3)</b>. Note: (1) Shows device is online. (2) Shows device is linked to Local Hub."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/devices.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/devices.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉</b>  Click on the 3 dots (1) in the top right corner."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉  Locate your IP address:</b> (Hard wired preferred), but you can use either one; just be sure you reserve the IP address in your router as this requires a static IP. (Refer to router manual for help with reserving ip address)"
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/details.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/details.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉</b>  Go back to the hub page and click on <b>Local Network (2)</b>."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉  Locate your Net ID (1)</b>"
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/local_network.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/local_network.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉  Client ID & Client Secret:</b> Go to the Integrations tab and locate the Client ID and Client Secret."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/local_api.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/local_api.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
@@ -161,6 +158,15 @@ def otherSettings() {
                   defaultValue: "Every 6 hours",
                   required: true,
                   submitOnChange: true
+
+            input name: "reconcileStepSeconds",
+                type: "number",
+                title: boldTitle("Reconcile per-device delay (seconds)"),
+                description: "Lower is faster. Minimum 1 second enforced to protect local hub API.",
+                defaultValue: 2,
+                required: true,
+                range: "1..30",
+                submitOnChange: true
 
             input "dateTimeFormat", "enum",
                   title: boldTitle("Date/Time format for events"),
@@ -236,7 +242,7 @@ def diagnostics() {
             timeout: 10
         ]) { resp -> /* ignore */ }
     } catch (e) {
-        logDebug("Delete ${errFile} failed (ok if first run): ${e?.message}")
+        logDebug { "Delete ${errFile} failed (ok if first run): ${e?.message}" }
     }
 
     def errData = ""
@@ -266,7 +272,7 @@ def diagnostics() {
             if (Hubitat_dni != null) {
                 Keep_Hubitat_dni += Hubitat_dni
                 countNewChildDevices++
-                logDebug("Created $countNewChildDevices of ${exposed.size()} selected devices.")
+                logDebug { "Created $countNewChildDevices of ${exposed.size()} selected devices." }
             }
         }
 
@@ -300,6 +306,21 @@ def diagnostics() {
                        nextPage: "finish") {
         section("") {
             paragraph "Processed ${devicesCount} selected device(s)."
+
+            def ys6604Selections = (exposed ?: []).findAll { dni ->
+                def model = state?.modelName?."${dni}"?.toString()?.toUpperCase()
+                return model?.startsWith("YS6604")
+            }
+            if (ys6604Selections && !ys6604Selections.isEmpty()) {
+                paragraph boldTitle("YS6604 driver probe results:")
+                ys6604Selections.each { dni ->
+                    def devLabel = state?.deviceName?."${dni}" ?: dni
+                    def model = state?.modelName?."${dni}" ?: "YS6604"
+                    def chosen = state?.outletFamilyChoice?."${dni}" ?: "Outlet (default)"
+                    paragraph "${devLabel} (${model}) → ${chosen}"
+                }
+            }
+
             if (state.errors) {
                 paragraph boldRedTitle("Some errors occurred. See ${errFile}.")
             } else {
@@ -370,14 +391,18 @@ def initialize() {
     state.unknownWarned = [:]   // reset the “warned” throttle map
 
     scheduleReconcile()
-    runIn(3, reconcileJob)      // or your existing first run
+    runIn(3, "runImmediateReconcile")
 }
 
    
 
 def refresh() {
-    reconcileJob()
+    runImmediateReconcile()
 }     
+
+def runImmediateReconcile() {
+    reconcileJob(true)
+}
 
 def uninstalled() {    
     unschedule()
@@ -390,11 +415,58 @@ String getDateTimeFormat() {
     return settings?.dateTimeFormat ?: "MM/dd/yyyy hh:mm:ss a"
 }
 
+// === Shared timestamp formatter — delegates from all child drivers ===
+String fmtTs(def ts) {
+    String f = getDateTimeFormat()
+    try {
+        TimeZone tz = location?.timeZone ?: TimeZone.getDefault()
+        Date d = null
+        if (ts instanceof Number) {
+            d = new Date((ts as long))
+        } else if (ts instanceof String) {
+            String s = ts.trim()
+            if (s.isLong()) {
+                d = new Date(s.toLong())
+            } else {
+                String[] patterns = [
+                    "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                    "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                    "yyyy-MM-dd'T'HH:mm:ssXXX"
+                ]
+                for (p in patterns) { try { d = Date.parse(p, s); break } catch (ignored) {} }
+            }
+        }
+        return d ? d.format(f, tz) : (ts?.toString())
+    } catch (e) {
+        return ts?.toString()
+    }
+}
+
+String getDeviceTypeFor(String devId) {
+    return state?.deviceType?."${devId}"?.toString()
+}
+
+String getDeviceTokenFor(String devId) {
+    return state?.deviceToken?."${devId}"?.toString()
+}
+
+String refreshDeviceTokenFor(String devId) {
+    if (!devId) return null
+    try {
+        getDeviceToken(devId)
+    } catch (Exception e) {
+        log.error "refreshDeviceTokenFor(${devId}) failed: ${e}"
+    }
+    return state?.deviceToken?."${devId}"?.toString()
+}
+
 // Use the YoLink deviceId as the child DNI (required for MQTT routing).
 // Also migrates any legacy child whose DNI != deviceId by deleting/recreating it.
 private create_yolink_device(Hubitat_dni, devname, devtype, devtoken, devId) {
     // --- driver name resolution ---
     def drivername = devtype
+    def modelName = state?.modelName?."${devId}"?.toString()
         if (devtype == "COSmokeSensor") drivername = "COSmokeSensor"
     if (devtype == "Dimmer") drivername = "Dimmer"
     if (devtype == "DoorSensor") drivername = "DoorSensor"
@@ -403,6 +475,7 @@ private create_yolink_device(Hubitat_dni, devname, devtype, devtoken, devId) {
     if (devtype == "LeakSensor") drivername = "LeakSensor"
     if (devtype == "LeakSensor3") drivername = "LeakSensor3"
     if (devtype == "Lock") drivername = "Lock"
+    if (devtype == "LockV2") drivername = "Lock"
     if (devtype == "Manipulator") drivername = "Manipulator"
     if (devtype == "MotionSensor") drivername = "MotionSensor"
     if (devtype == "MultiOutlet") drivername = "MultiOutlet"
@@ -419,6 +492,18 @@ private create_yolink_device(Hubitat_dni, devname, devtype, devtoken, devId) {
     if (devtype == "VibrationSensor") drivername = "VibrationSensor"
     if (devtype == "WaterDepthSensor") drivername = "WaterDepthSensor"
     if (devtype == "WaterMeterController") drivername = "WaterMeterController"
+
+    // Relay family can vary by hub/firmware: MultiOutlet / SmartOutdoorPlug / Outlet / Switch.
+    if (["MultiOutlet", "SmartOutdoorPlug", "Outlet", "Switch"].contains(devtype) ||
+        modelName?.toUpperCase()?.startsWith("YS6604") ||
+        isPowerMonitoringModel(modelName)) {
+        drivername = getRelayFamilyDriver(devname, devtype, devtoken, devId, modelName)
+        if (isPowerMonitoringModel(modelName) && ["Outlet", "Switch"].contains(drivername)) {
+            drivername = "Outlet Power Monitor"
+        }
+        log.info "${devname} (${modelName ?: devtype}) mapped to ${drivername} driver"
+    }
+
 drivername = getYoLinkDriverName(drivername)
     if (!drivername.endsWith("Local")) drivername += " Local"
 
@@ -496,15 +581,15 @@ def getDeviceToken(dni) {
             def responseValues=[]              
             if (object.data.devices instanceof Collection) { 
                 responseValues=object.data.devices           
-                logDebug("Parsing multiple devices: ${responseValues}")
+                logDebug { "Parsing multiple devices: ${responseValues}" }
             } else {
                 responseValues[0]=object.data.devices                    
-                logDebug("Parsing single device: ${responseValues}")
+                logDebug { "Parsing single device: ${responseValues}" }
             }                
                 
             for (def device : responseValues) {               
                 if (device.deviceId == dni) {
-                    logDebug("Located ${device.name}")
+                    logDebug { "Located ${device.name}" }
                     def child = findChild(dni)
                     child.setDeviceToken(device.token)
                     state.deviceToken[dni] = device.token 
@@ -526,26 +611,32 @@ def getDeviceToken(dni) {
 def pollDevices() {
     def kids = getChildDevices()
     if (!kids || kids.isEmpty()) {
-        logDebug("Reconcile: no child devices found.")
+        logDebug { "Reconcile: no child devices found." }
         return
     }
     if (state.reconcileInProgress) {
-        logDebug("Reconcile already in progress; skipping new start.")
+        logDebug { "Reconcile already in progress; skipping new start." }
         return
     }
     // Build a queue of DNIs to process
     state.reconcileQueue = kids*.deviceNetworkId
     state.reconcileInProgress = true
-    logDebug("Reconcile: queued ${state.reconcileQueue.size()} device(s).")
+    logDebug { "Reconcile: queued ${state.reconcileQueue.size()} device(s)." }
     runIn(1, "reconcileNextDevice")
 }
 
 def reconcileNextDevice() {
+    // Guard: reject stale or duplicate runIn callbacks that arrive after reconcile is done/reset
+    if (!state.reconcileInProgress) {
+        logDebug { "Reconcile: reconcileNextDevice() called but reconcile is not in progress — ignoring." }
+        return
+    }
+
     List q = (state.reconcileQueue ?: []) as List
     if (!q || q.isEmpty()) {
         state.reconcileInProgress = false
         state.reconcileQueue = []
-        logDebug("Reconcile: finished all devices.")
+        logDebug { "Reconcile: finished all devices." }
         return
     }
 
@@ -558,7 +649,7 @@ def reconcileNextDevice() {
             boolean invoked = false
 
             // Try the most specific call your drivers support
-            try { dev.pollDevice(1); invoked = true } catch (ignored) {}
+            try { dev.pollDevice(0); invoked = true } catch (ignored) {}
 
             if (!invoked) {
                 try { dev.poll(true); invoked = true } catch (ignored) {}
@@ -570,20 +661,27 @@ def reconcileNextDevice() {
                 try { dev.refresh(); invoked = true } catch (ignored) {}
             }
 
-            logDebug("Reconcile: ${dev.displayName} -> ${invoked ? 'invoked' : 'no suitable method'}")
+            logDebug { "Reconcile: ${dev.displayName} -> ${invoked ? 'invoked' : 'no suitable method'}" }
         } catch (e) {
             log.error "reconcileNextDevice() exception for ${dev}: ${e}"
+            // Clear flag so future reconcile runs are not permanently blocked
+            state.reconcileInProgress = false
+            state.reconcileQueue = []
+            return
         }
     } else {
         log.warn "Reconcile: child with DNI ${dni} not found."
     }
 
-    // Stagger the next device to avoid bursts
+    Integer stepSec = 2
+    try { stepSec = Math.max(1, (settings?.reconcileStepSeconds ?: 2) as Integer) } catch (ignored) { stepSec = 2 }
+
+    // Stagger the next device to avoid bursts (minimum 1s floor to protect local hub API)
     if (state.reconcileQueue && !state.reconcileQueue.isEmpty()) {
-        runIn(10, "reconcileNextDevice")   // 10s between devices
+        runIn(stepSec, "reconcileNextDevice")
     } else {
         state.reconcileInProgress = false
-        logDebug("Reconcile: finished all devices.")
+        logDebug { "Reconcile: finished all devices." }
     }
 }
 
@@ -593,20 +691,22 @@ def passMQTT(topic) {
     String payloadStr = topic?.payload
     if (!payloadStr) return null
 
-    String devId = null
-    try {
-        def payload = new JsonSlurper().parseText(payloadStr)
-        devId = payload?.deviceId as String
-    } catch (e) {
-        logDebug("passMQTT: malformed JSON payload: ${e?.message}")
-        return null
+    String devId = topic?.deviceId as String
+    if (!devId) {
+        try {
+            def payload = new JsonSlurper().parseText(payloadStr)
+            devId = payload?.deviceId as String
+        } catch (e) {
+            logDebug { "passMQTT: malformed JSON payload: ${e?.message}" }
+            return null
+        }
     }
     if (!devId) return null
 
     def dev = getChildDevice(devId)
     if (dev) {
         try {
-            logDebug("Passing MQTT to ${dev.displayName} (${dev.deviceNetworkId})")
+            logDebug { "Passing MQTT to ${dev.displayName} (${dev.deviceNetworkId})" }
             if (dev.respondsTo('processStateData')) {
                 dev.processStateData(payloadStr)   // preferred
             } else {
@@ -623,19 +723,23 @@ def passMQTT(topic) {
     boolean isExposed = (settings?.exposed instanceof Collection) && settings.exposed.contains(devId)
     if (!isExposed) {
         // The user did NOT add this device in the app — ignore quietly (debug only).
-        logDebug("Ignoring MQTT for unselected device ${devId}")
+        logDebug { "Ignoring MQTT for unselected device ${devId}" }
         return null
     }
 
     // Selected in the app but child missing — warn, but rate-limit so we don’t spam.
-    state.unknownWarned = (state.unknownWarned ?: [:])
-    long lastWarn = (state.unknownWarned[devId] ?: 0L) as long
-    if (now() - lastWarn > 60000) {  // 1 minute throttle
+    // Prune expired entries before writing to keep the map from growing unbounded.
+    long nowMs = now()
+    Map warned = (state.unknownWarned ?: [:]) as Map
+    warned = warned.findAll { k, v -> (nowMs - ((v ?: 0L) as long)) < 60000 }
+    long lastWarn = (warned[devId] ?: 0L) as long
+    if (nowMs - lastWarn > 60000) {  // 1 minute throttle
         log.warn "MQTT received for selected device ${devId}, but child device not found. Did it get deleted? Recreate from the app."
-        state.unknownWarned[devId] = now()
+        warned[devId] = nowMs
     } else {
-        logDebug("Suppressed repeat warning for missing selected device ${devId}")
+        logDebug { "Suppressed repeat warning for missing selected device ${devId}" }
     }
+    state.unknownWarned = warned
     return null
 }
 
@@ -662,12 +766,12 @@ private def tokenURL() {return "http://${settings.localHubIP}:1080/open/yolink/t
 private def getStandardImagePath() {return "http://cdn.device-icons.smartthings.com/"}
 private int SUCCESS() {return 200}
 private int UNAUTHORIZED() {return 401}
-private def getImagePath() {return "https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/icons/"}   
+private def getImagePath() {return "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Yolink%20Local%20Hub/Pics/"}   
 
 def AuthToken() {state.access_token}  
 
 def refreshAuthToken() {   
-    logDebug("Refreshing access token (Local API)")
+    logDebug { "Refreshing access token (Local API)" }
     boolean rc = false    
             
     state?.Client_ID = Client_ID.trim()
@@ -685,7 +789,7 @@ def refreshAuthToken() {
     def headers = ["Content-Type": "application/x-www-form-urlencoded"]
     def body = "grant_type=client_credentials&client_id=${state.Client_ID}&client_secret=${state.Client_Secret}"
 
-    logDebug("Attempting to get local access token from ${url}")
+    logDebug { "Attempting to get local access token from ${url}" }
     
     try {     
         httpPost([
@@ -696,10 +800,10 @@ def refreshAuthToken() {
             timeout: 10
         ]) { resp ->                     
             if (resp.status == 200 && resp.data?.access_token) {
-                logDebug("Local API Response: SUCCESS")
+                logDebug { "Local API Response: SUCCESS" }
                 state.access_token     = resp.data.access_token                    
                 state.access_token_ttl = resp.data?.expires_in                    
-                logDebug("New local access token = ${state.access_token}")
+                logDebug { "New local access token = ${state.access_token}" }
                 rc = true
             } else { 
                 state.token_error = "Local API token request failed (HTTP ${resp.status})"
@@ -718,7 +822,7 @@ def refreshAuthToken() {
         log.error state.token_error
     }  
     
-    logDebug("refreshAuthToken() RC = ${rc}")
+    logDebug { "refreshAuthToken() RC = ${rc}" }
     return rc
 }
 
@@ -811,7 +915,7 @@ def getDevices() {
 def pollAPI(body, name=null, type=null){
     def rc=null
     def retry=3
-    logDebug("pollAPI(${body})")
+    logDebug { "pollAPI(${body})" }
         
     while ((rc == null) && (retry>0)) {      
         def headers = ["Authorization": "Bearer ${state.access_token}"]
@@ -821,37 +925,31 @@ def pollAPI(body, name=null, type=null){
             body    : body 
         ]     
         
-        logDebug("Attempting to poll Local API using parameters: ${Params}")
+        logDebug { "Attempting to poll Local API using parameters: ${Params}" }
         
         try {     
             httpPostJson(Params) { resp ->
                 if (resp.data) {                    
-                    logDebug("API Response: ${resp.data}")
+                    logDebug { "API Response: ${resp.data}" }
                     def object = resp.data
                     def code = object.code                  
                     def desc = object.desc  
                     
                     if ((!desc) || (code==desc)) {
                         desc = translateCode(code)
-                        logDebug("Translated Response: ${desc}")
+                        logDebug { "Translated Response: ${desc}" }
                     }  
                     
                     switch (code) {
                         case "000000": 
-                            logDebug("Polling of Local API completed successfully")
+                            logDebug { "Polling of Local API completed successfully" }
                             rc = object
                             break;
                         
                         case "020104":
-                            if (retry>0) {
-                                pauseExecution(5000)
-                                retry--
-                                logDebug("Device busy. Retry=${retry}")
-                            } else {          
-                                log.error "Device busy and retry failed."
-                                retry = -1
-                                rc = object
-                            }     
+                            log.warn "Device '${name}' busy — will retry on next poll cycle."
+                            retry = -1
+                            rc = object
                             break;    
                     
                         case "000201":
@@ -872,7 +970,7 @@ def pollAPI(body, name=null, type=null){
                         case "010104":
                              if (retry>0) {
                                 retry--
-                                logDebug('Request token expired. Refreshing and retry...')
+                                logDebug { 'Request token expired. Refreshing and retry...' }
                                 refreshAuthToken()                                         
                              } else {          
                                 log.error "Request token expired and retry failed."
@@ -1002,7 +1100,7 @@ def scheduledDays(weekdays) {
      ndx--  
    }    
     
-   logDebug("Scheduled Days: ${days}")
+   logDebug { "Scheduled Days: ${days}" }
    return days 
 }
 
@@ -1039,31 +1137,120 @@ private void scheduleReconcile() {
     if (settings?.debugging == "True") log.debug "Scheduling reconcile: ${cad}"
 
     // Always clear any prior schedules for this job
-    unschedule(reconcileJob)
+    unschedule("reconcileJob")
 
     switch (cad) {
         case "Off":
             // no schedule
             break
         case "Hourly":
-            runEvery1Hour(reconcileJob)
+            runEvery1Hour("reconcileJob")
             break
         case "Every 6 hours":
-            schedule("0 0 */6 * * ?", reconcileJob)     // top of every 6th hour
+            schedule("0 0 */6 * * ?", "reconcileJob")     // top of every 6th hour
             break
         case "Every 12 hours":
-            schedule("0 0 */12 * * ?", reconcileJob)
+            schedule("0 0 */12 * * ?", "reconcileJob")
             break
         case "Daily":
-            schedule("0 0 3 * * ?", reconcileJob)       // 03:00 hub local time
+            schedule("0 0 3 * * ?", "reconcileJob")       // 03:00 hub local time
             break
     }
+
+    logDebug { "Reconcile cadence '${cad}' | next scheduled run: ${nextReconcileRunText(cad)}" }
+}
+
+private String nextReconcileRunText(String cad) {
+    if (cad == "Off") return "disabled"
+
+    def tz = location?.timeZone ?: TimeZone.getTimeZone('UTC')
+    Calendar cal = Calendar.getInstance(tz)
+    Date nowDate = new Date()
+    cal.setTime(nowDate)
+
+    switch (cad) {
+        case "Hourly":
+            cal.set(Calendar.MINUTE, 0)
+            cal.set(Calendar.SECOND, 0)
+            cal.set(Calendar.MILLISECOND, 0)
+            cal.add(Calendar.HOUR_OF_DAY, 1)
+            break
+
+        case "Every 6 hours":
+        case "Every 12 hours":
+            int step = (cad == "Every 6 hours") ? 6 : 12
+            cal.set(Calendar.MINUTE, 0)
+            cal.set(Calendar.SECOND, 0)
+            cal.set(Calendar.MILLISECOND, 0)
+            int hoursToAdd = (step - (cal.get(Calendar.HOUR_OF_DAY) % step)) % step
+            if (hoursToAdd == 0) hoursToAdd = step   // already on boundary — next occurrence is step hours away
+            cal.add(Calendar.HOUR_OF_DAY, hoursToAdd)
+            break
+
+        case "Daily":
+            cal.set(Calendar.HOUR_OF_DAY, 3)
+            cal.set(Calendar.MINUTE, 0)
+            cal.set(Calendar.SECOND, 0)
+            cal.set(Calendar.MILLISECOND, 0)
+            if (!cal.getTime().after(nowDate)) {
+                cal.add(Calendar.DAY_OF_MONTH, 1)
+            }
+            break
+
+        default:
+            return "unknown"
+    }
+
+    return cal.getTime().format(getDateTimeFormat(), tz)
 }
 
 /** Periodic reconcile: call each child’s poll(true) (HTTP getState) with small staggering */
-def reconcileJob() {
+def reconcileJob(Boolean force = false) {
+    if (!shouldRunReconcile(force)) return
+    state.lastReconcileRunMs = now()
     if (settings?.debugging == "True") log.debug "Reconcile job: HTTP getState across children"
     pollDevices()   // uses the drop-in version below (no reschedule)
+}
+
+private boolean shouldRunReconcile(Boolean force = false) {
+    if (force) return true
+
+    String cad = settings?.reconcileCadence ?: "Every 6 hours"
+    if (cad == "Off") {
+        logDebug { "Reconcile skipped: cadence is Off" }
+        return false
+    }
+
+    Integer minSeconds = cadenceToSeconds(cad)
+    if (minSeconds <= 0) return true
+
+    long lastMs = (state.lastReconcileRunMs ?: 0L) as long
+    if (lastMs <= 0L) return true
+
+    long elapsedMs = now() - lastMs
+    long minMs = (minSeconds as long) * 1000L
+    if (elapsedMs < minMs) {
+        logDebug { "Reconcile skipped: elapsed ${Math.round(elapsedMs/1000)}s < cadence ${minSeconds}s (${cad})" }
+        return false
+    }
+    return true
+}
+
+private Integer cadenceToSeconds(String cad) {
+    switch (cad) {
+        case "Hourly":
+            return 3600
+        case "Every 6 hours":
+            return 21600
+        case "Every 12 hours":
+            return 43200
+        case "Daily":
+            return 86400
+        case "Off":
+            return Integer.MAX_VALUE
+        default:
+            return 21600
+    }
 }
 
 
@@ -1104,7 +1291,7 @@ def getTHSensorDriver(name, type, token, devId) {
         def object = pollAPI(request, name, type)
 
         if (object) {
-            logDebug("getTHSensorDriver()> pollAPI() response: ${object}")
+            logDebug { "getTHSensorDriver()> pollAPI() response: ${object}" }
 
             if (object.code == "000000") {
                 def state = object.data?.state ?: [:]
@@ -1143,7 +1330,7 @@ def getLeakSensorDriver(name,type,token,devId) {
         def object = pollAPI(request, name, type)
          
         if (object) {
-            logDebug("getLeakSensorDriver()> pollAPI() response: ${object}")     
+            logDebug { "getLeakSensorDriver()> pollAPI() response: ${object}" }     
             
             if (object.code == "000000") {             
                 def supportChangeMode = object.data.state.supportChangeMode                            
@@ -1170,50 +1357,93 @@ def getLeakSensorDriver(name,type,token,devId) {
     return driver
 }  
 
-// YoLink MultiOutlet (YS6801-UC) and Smart Outdoor Plug (YS6802-UC/SH-18A) are both reported as "MultiOutlet"
-// If device only returns delays on 2 channels (0 and 1), assume it's a Smart Outdoor Plug 
-def getMultiOutletDriver(name,type,token,devId) {
-    def driver = "MultiOutlet"
-    try {  
-        def request = [:]
-        request.put("method", "MultiOutlet.getState")                   
-        request.put("targetDevice", "${devId}") 
-        request.put("token", "${token}") 
-        
-        def object = pollAPI(request, name, type)
-         
-        if (object) {
-            logDebug("getMultiOutletDriver() - pollAPI() response: ${object}")     
-            
-            if (object.code == "000000") {             
-                def delay = object.data?.delays[2]                                            
-                
-                if (delay==null) { 
-                    log.info "$name appears to be a Smart Outdoor Plug."
-                    driver = "Smart Outdoor Plug"
-                } else {
-                    log.info "$name appears to be a MultiOutlet Device."
-                }    
-            } else {  //Error
-                log.error "Local API polling returned error: $object.code - " + translateCode(object.code)               
-            }     
-        } else {
-            log.error "No response from Local API request"
-        } 
-    } catch (groovyx.net.http.HttpResponseException e) {
-        if (e?.statusCode == UNAUTHORIZED_CODE) { 
-            log.error("getMultiOutletDriver() - Unauthorized Exception")
-        } else {
-            log.error("getMultiOutletDriver() - Exception $e")
-        }                 
-    }
-    return driver
-}   
+private Map probeRelayMethod(String method, name, type, token, devId) {
+    def request = [method: method, targetDevice: "${devId}", token: "${token}"]
+    def object = pollAPI(request, name, type)
+    logDebug { "probeRelayMethod(${method}) -> ${object}" }
+    return object
+}
 
-def logDebug(msg) {
+private String classifyRelayDriverFromProbe(String method, object, name) {
+    if (method?.startsWith("MultiOutlet.")) {
+        def delays = object?.data?.delays
+        def delay2 = null
+        if (delays instanceof List && delays.size() > 2) {
+            delay2 = delays[2]
+        } else if (delays instanceof Map) {
+            delay2 = delays[2]
+        }
+        if (delay2 == null) {
+            log.info "$name appears to be a Smart Outdoor Plug."
+            return "SmartOutdoorPlug"
+        }
+        log.info "$name appears to be a MultiOutlet Device."
+        return "MultiOutlet"
+    }
+    if (method?.startsWith("Switch.")) {
+        log.info "$name appears to use Switch API namespace."
+        return "Switch"
+    }
+    log.info "$name appears to use Outlet API namespace."
+    return "Outlet"
+}
+
+private Boolean isPowerMonitoringModel(String modelName) {
+    String model = (modelName ?: "").toString().toUpperCase()
+    return model.startsWith("YS6614") || model.startsWith("YS6602")
+}
+
+// Generic relay-family probe: supports MultiOutlet, SmartOutdoorPlug, Outlet, and Switch.
+def getRelayFamilyDriver(name, type, token, devId, modelName=null) {
+    state.outletFamilyChoice = (state.outletFamilyChoice ?: [:])
+
+    String t = (type ?: "").toString()
+    String model = (modelName ?: "").toString().toUpperCase()
+
+    List<String> probeOrder
+    if (["MultiOutlet", "SmartOutdoorPlug"].contains(t) || model.startsWith("YS680")) {
+        probeOrder = ["MultiOutlet.getState", "Outlet.getState", "Switch.getState"]
+    } else if (t == "Switch") {
+        probeOrder = ["Switch.getState", "Outlet.getState", "MultiOutlet.getState"]
+    } else {
+        probeOrder = ["Outlet.getState", "Switch.getState", "MultiOutlet.getState"]
+    }
+
+    String fallback = (["MultiOutlet", "SmartOutdoorPlug"].contains(t) || model.startsWith("YS680")) ? "MultiOutlet" : "Outlet"
+
+    try {
+        for (String method : probeOrder) {
+            def obj = probeRelayMethod(method, name, type, token, devId)
+            if (obj?.code == "000000") {
+                String selected = classifyRelayDriverFromProbe(method, obj, name)
+                state.outletFamilyChoice["${devId}"] = selected
+                return selected
+            }
+            logDebug { "${name} did not respond to ${method} (code=${obj?.code})" }
+        }
+
+        log.warn "$name did not respond successfully to relay-family probes; defaulting to ${fallback}."
+        state.outletFamilyChoice["${devId}"] = "${fallback} (default)"
+    } catch (Exception e) {
+        log.error("getRelayFamilyDriver() - Exception $e")
+        state.outletFamilyChoice["${devId}"] = "${fallback} (default)"
+    }
+    return fallback
+}
+
+// Backward-compatible wrappers
+def getMultiOutletDriver(name, type, token, devId) {
+    return getRelayFamilyDriver(name, type, token, devId, null)
+}
+
+def getOutletFamilyDriver(name, type, token, devId) {
+    return getRelayFamilyDriver(name, type, token, devId, null)
+}
+
+def logDebug(Closure msg) {
     if (debugging == "True") {
-       log.debug msg
-    }   
+       log.debug msg()
+    }
 }    
 
 def appendData(olddata, newdata) {
