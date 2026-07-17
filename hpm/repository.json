@@ -11,6 +11,16 @@
         "MQTT",
         "Misc. Devices"
       ]
+    },
+    {
+      "name": "INTECULAR™ MQTT Connector",
+      "category": "Integrations",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/hpm/InvisOutlet.json",
+      "description": "InvisOutlet integration. App + MQTT required; device drivers optional/selectable.",
+      "tags": [
+        "MQTT",
+        "Misc. Devices"
+      ]
     }
   ]
 }
