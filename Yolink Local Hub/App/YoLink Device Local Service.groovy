@@ -34,7 +34,9 @@ definition(
     oauth: false,    
     category: "YoLink",
     singleInstance: true,
-    importUrl: "https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/YoLink_Device_Service.groovy"
+    iconUrl: "${getImagePath()}yolink.png",
+    iconX2Url: "${getImagePath()}yolink.png",
+	importUrl: "https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/YoLink_Device_Service.groovy"
 )
 
 preferences {
