@@ -29,7 +29,7 @@
       "namespace": "Almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20MQTT%20Listener.groovy",
       "required": true,
-      "version": "1.1.0"
+      "version": "1.1.1"
     },
     {
       "id": "aebb1b09-f739-4705-88d8-569cca1d0480",
