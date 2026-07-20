@@ -13,12 +13,26 @@
  * Debug logging and the raw-traffic/audit tools below are the only things on this
  * device meant for a person to actually look at; everything else is configured by
  * the app automatically.
+ *
+ * 1.1.0 - Initial Working Version
+ * 1.1.1 - Fixed "LimitExceededException: ... generates excessive hub load" errors caused
+ *         by the Aura/Pro units republishing their full sensor telemetry on a ~1s cycle
+ *         regardless of whether anything changed. The existing isDuplicateUpdate() only
+ *         guarded the switch/light and event/button paths - binary_sensor (motion/
+ *         occupancy) and the numeric default branch (temperature, humidity, illuminance,
+ *         distance, AQI, CO2, air pressure, VOC) had no rate limiting at all, so every
+ *         republish cascaded straight through to forwardUpdateEntity(). Added a new
+ *         isThrottled() time-based cap (separate from the exact-value dedup, since a
+ *         slightly-jittering reading can bypass a value-equality check) and applied it
+ *         to both previously-unguarded paths: 1.5s for motion/occupancy, 5s for the
+ *         slow-moving environmental readings. clearDiscoveryCache() now also resets the
+ *         new throttle-tracking state.
  */
 
 import groovy.json.JsonSlurper
 import groovy.transform.Field
 
-def clientVersion() { "1.1.0" }
+def clientVersion() { "1.1.1" }
 private def copyright() { return "<br>© 2026-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved." }
 def driverName() { "InvisOutlet MQTT Listener" }
 def activeScale() { (parent?.getTemperatureScale() == "F") ? "Fahrenheit (°F)" : "Celsius (°C)" }
@@ -474,6 +488,24 @@ def isDuplicateUpdate(String dni, String attr, value, long windowMs) {
     return dup
 }
 
+// NEW in 1.1.1: caps how often we'll forward a given attribute upstream, independent of
+// whether the value is an exact repeat of the last one. The Aura/Pro units republish their
+// full sensor telemetry on a roughly 1-second cycle even when nothing meaningfully changed,
+// and isDuplicateUpdate() alone doesn't catch that for readings that jitter slightly each
+// cycle (e.g. illuminance, distance, air quality). This throttle caps call frequency itself,
+// which is what was actually tripping Hubitat's "excessive hub load" governor - the
+// binary_sensor (motion/occupancy) and default numeric branch below had no rate limiting
+// of any kind before this version.
+def isThrottled(String dni, String attr, long minIntervalMs) {
+    if (state.lastForwardTime == null) state.lastForwardTime = [:]
+    def key = "${dni}|${attr}"
+    def nowMs = now()
+    def last = state.lastForwardTime[key]
+    if (last && (nowMs - (last as Long)) < minIntervalMs) return true
+    state.lastForwardTime[key] = nowMs
+    return false
+}
+
 def handleStateMessage(String topic, String payload) {
     def entries = state.topicToEntity ? state.topicToEntity[topic] : null
     if (!entries) return
@@ -543,8 +575,11 @@ def handleStateMessage(String topic, String payload) {
                 def active = (v == meta.payloadOn?.toString()) || v?.equalsIgnoreCase("on") || v == "1"
                 if (meta.isButton) {
                     if (active && !isDuplicateUpdate(entry.dni, entry.attr, "press", 500)) parent?.forwardButtonEvent(entry.dni, entry.attr)
-                } else {
+                } else if (!isDuplicateUpdate(entry.dni, entry.attr, active, 2000) && !isThrottled(entry.dni, entry.attr, 1500)) {
+                    // 1.1.1: motion/occupancy previously had no rate limiting at all.
                     parent?.forwardUpdateEntity(entry.dni, entry.attr, meta.platform, meta.deviceClass, active, meta.unit)
+                } else if (logEnable) {
+                    log.debug "Suppressing '${entry.attr}' update (${active}) - duplicate or too frequent"
                 }
                 break
             default:
@@ -553,15 +588,23 @@ def handleStateMessage(String topic, String payload) {
                     if (state.lastRawTemp == null) state.lastRawTemp = [:]
                     if (state.lastRawTemp[entry.dni] == null) state.lastRawTemp[entry.dni] = [:]
                     state.lastRawTemp[entry.dni][entry.attr] = [value: numeric, unit: meta.unit]
-                    def converted = convertTemperatureForDisplay(numeric, meta.unit)
-                    parent?.forwardUpdateEntity(entry.dni, entry.attr, meta.platform, meta.deviceClass, converted.value, converted.unit)
+                    // 1.1.1: raw value is still cached every time (so a C/F toggle recompute
+                    // stays accurate), but the actual forward upstream is now throttled.
+                    if (!isThrottled(entry.dni, entry.attr, 5000)) {
+                        def converted = convertTemperatureForDisplay(numeric, meta.unit)
+                        parent?.forwardUpdateEntity(entry.dni, entry.attr, meta.platform, meta.deviceClass, converted.value, converted.unit)
+                    }
                 } else if (numeric != null && entry.attr == "distance") {
                     if (state.lastRawDistanceCm == null) state.lastRawDistanceCm = [:]
                     if (state.lastRawDistanceCm[entry.dni] == null) state.lastRawDistanceCm[entry.dni] = [:]
                     state.lastRawDistanceCm[entry.dni][entry.attr] = numeric
-                    def converted = convertDistanceForDisplay(numeric)
-                    parent?.forwardUpdateEntity(entry.dni, entry.attr, meta.platform, meta.deviceClass, converted.value, converted.unit)
-                } else {
+                    if (!isThrottled(entry.dni, entry.attr, 5000)) {
+                        def converted = convertDistanceForDisplay(numeric)
+                        parent?.forwardUpdateEntity(entry.dni, entry.attr, meta.platform, meta.deviceClass, converted.value, converted.unit)
+                    }
+                } else if (!isThrottled(entry.dni, entry.attr, 5000)) {
+                    // 1.1.1: covers humidity, illuminance, AQI, CO2, air pressure, VOC, and
+                    // any other numeric sensor that previously flooded through unguarded.
                     parent?.forwardUpdateEntity(entry.dni, entry.attr, meta.platform, meta.deviceClass, numeric != null ? numeric : value, meta.unit)
                 }
                 break
@@ -719,6 +762,7 @@ def clearDiscoveryCache() {
     state.lastRawTemp = [:]
     state.lastRawDistanceCm = [:]
     state.lastNotifySeen = [:]
+    state.lastForwardTime = [:]  // 1.1.1: new throttle-tracking map
     sendEvent(name: "deviceCount", value: 0)
 }
 
