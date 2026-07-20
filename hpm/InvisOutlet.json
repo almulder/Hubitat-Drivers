@@ -5,7 +5,7 @@
   "dateReleased": "2026-07-15",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Intecular",
   "communityLink": "https://community.hubitat.com/t/intecular-invisoutlet-hubitat-mqtt-app-drivers-beta/165173",
-  "releaseNotes": "HPM packaging: App + MQTT required; device drivers optional/selectable.",
+  "releaseNotes": "1.1.1 (MQTT Listener) - Fixed 'excessive hub load' errors on Aura/Pro units caused by rapid sensor republishing. Added throttling to motion/occupancy and numeric sensor updates (temperature, humidity, illuminance, distance, AQI, CO2, air pressure, VOC). No re-pairing needed.\nInitial Version 1.1.0 - HPM packaging: App + MQTT required; device drivers optional/selectable.",
    "tags": [
     "MQTT",
     "Misc. Devices"
