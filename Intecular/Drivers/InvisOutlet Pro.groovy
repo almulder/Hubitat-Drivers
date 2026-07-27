@@ -37,8 +37,15 @@
  * INSTALL: Drivers Code -> New Driver -> paste this file -> Save. Also install the
  * "InvisOutlet MQTT Listener" driver and the "InvisOutlet Device Service" app.
  * 1.1.0 - Initial Working Version
+ * 1.1.1 - Added markPending(attrName, platform, deviceClass), called by the app right
+ * after this device is created: stamps a "pending" placeholder on each attribute so
+ * the driver page shows something meaningful immediately, instead of blank until a
+ * real MQTT value arrives. Unlike updateEntity(), does not collapse the value into
+ * fixed on/off or active/inactive text.
+ * 2.0.0 - Version alignment with the App and Listener's coordinated 2.0.0 release - no
+ * functional changes in this file.
  */
-def clientVersion() { "1.1.0" }
+def clientVersion() { "2.0.0" }
 private def copyright() { return "<br>© 2026-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved." }
 def driverName() { "InvisOutlet Pro" }
 def activeScale() { (parent?.getTemperatureScale() == "F") ? "Fahrenheit (°F)" : "Celsius (°C)" }
@@ -180,6 +187,30 @@ def updateEntity(String attrName, String platform, deviceClass, value, unit = nu
 
 def updateLevel(level) {
     sendEvent(name: "level", value: level)
+}
+
+// Called by the app right after this device is created, to stamp a "pending"
+// placeholder on every attribute the app knows this specific unit has - unlike
+// updateEntity() above, this does NOT collapse the value into fixed on/off or
+// active/inactive text, since "pending" needs to actually be visible as-is.
+def markPending(String attrName, String platform, deviceClass) {
+    switch (platform) {
+        case "switch":
+        case "light":
+            sendEvent(name: attrName, value: "pending")
+            break
+        case "binary_sensor":
+            if (deviceClass == "motion") {
+                sendEvent(name: "motion", value: "pending")
+            } else if (deviceClass == "occupancy") {
+                sendEvent(name: "presence", value: "pending")
+            } else {
+                sendEvent(name: attrName, value: "pending")
+            }
+            break
+        default:
+            sendEvent(name: attrName, value: "pending")
+    }
 }
 
 // Called for touch-button presses (MQTT device_automation trigger, HA "event"
