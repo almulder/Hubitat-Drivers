@@ -2,10 +2,10 @@
   "packageName": "INTECULAR™ InvisOutlet MQTT Connector",
   "author": "Albert Mulder",
   "minimumHEVersion": "2.2.9",
-  "dateReleased": "2026-07-15",
+  "dateReleased": "2026-07-27",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Intecular",
   "communityLink": "https://community.hubitat.com/t/intecular-invisoutlet-hubitat-mqtt-app-drivers-beta/165173",
-  "releaseNotes": "1.1.1 (MQTT Listener) - Fixed 'excessive hub load' errors on Aura/Pro units caused by rapid sensor republishing. Added throttling to motion/occupancy and numeric sensor updates (temperature, humidity, illuminance, distance, AQI, CO2, air pressure, VOC). No re-pairing needed.\n1.1.0 - Initial Package Version - HPM packaging: App + MQTT required; device drivers optional/selectable.",
+  "releaseNotes": "2.0.3 (MQTT Listener) - Finally Fixed 'excessive hub load' errors on Aura/Pro units caused by rapid sensor republishing. Added throttling to motion/occupancy and numeric sensor updates (temperature, humidity, illuminance, distance, AQI, CO2, air pressure, VOC). No re-pairing needed.\n",
    "tags": [
     "MQTT",
     "Misc. Devices"
@@ -19,7 +19,7 @@
       "required": true,
       "oauth": false,
       "primary": true,
-      "version": "1.1.0"
+      "version": "2.0.0"
     }
   ],
   "drivers": [
@@ -29,7 +29,7 @@
       "namespace": "Almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20MQTT%20Listener.groovy",
       "required": true,
-      "version": "1.1.1"
+      "version": "2.0.3"
     },
     {
       "id": "aebb1b09-f739-4705-88d8-569cca1d0480",
@@ -37,7 +37,7 @@
       "namespace": "Almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20Pro.groovy",
       "required": false,
-      "version": "1.1.0"
+      "version": "2.0.0"
     },
     {
       "id": "5f837480-eb6b-43b3-80d6-4b8ef2fafae1",
@@ -45,7 +45,7 @@
       "namespace": "Almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20Aura.groovy",
       "required": false,
-      "version": "1.1.0"
+      "version": "2.0.0"
     }
   ]
 }
