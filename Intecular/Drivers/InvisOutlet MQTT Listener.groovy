@@ -14,6 +14,11 @@
  * device meant for a person to actually look at; everything else is configured by
  * the app automatically.
  *
+ * Version numbers below are left as originally assigned, not renumbered - a gap (e.g.
+ * 1.2.0 jumping to 1.5.0) marks where entries were removed entirely because they
+ * described an intermediate approach that was tried, real-world tested, found broken,
+ * and fully replaced by a later entry, with none of that code remaining today.
+ *
  * 1.1.0 - Initial Working Version
  * 1.1.1 - Fixed "LimitExceededException: ... generates excessive hub load" errors caused
  *         by the Aura/Pro units republishing their full sensor telemetry on a ~1s cycle
@@ -27,12 +32,91 @@
  *         to both previously-unguarded paths: 1.5s for motion/occupancy, 5s for the
  *         slow-moving environmental readings. clearDiscoveryCache() now also resets the
  *         new throttle-tracking state.
+ * 1.2.0 - Added a testPort(ip, port) command that opens a raw TCP socket (separate from
+ *         the MQTT connection) to check whether something is listening - used by the app
+ *         to auto-detect Hubitat's built-in MQTT broker before you've entered any broker
+ *         details. Since this only ever runs before initialize()/connect() are called for
+ *         real, there's no moment where both interfaces are active at once, so parse()
+ *         just checks a state.portTestActive flag at the top and routes accordingly - no
+ *         separate driver needed for this.
+ * 1.5.0 - Added probeAllDevices(dnis) to actively confirm every discovered device is
+ *         still real and reachable, rather than passively waiting to see if it happens
+ *         to publish something within some timeout. InvisHome does not appear to clear a
+ *         device's retained MQTT discovery message when it's removed from the phone app,
+ *         so passive "have we heard anything recently" timing can't tell a genuinely
+ *         removed device apart from one that's simply quiet for a moment. Probes the
+ *         WHOLE queue of dnis internally, one at a time via runInMillis chaining, briefly
+ *         flashing each device's nightlight/colorlight on then off and comparing a
+ *         before/after timestamp to detect a real MQTT echo. The app calls this exactly
+ *         once, waits once (using estimateProbeDurationMs() to know how long), then
+ *         reads the finished results back via getProbeResults() - a plain method call
+ *         return value, not an attribute/currentValue() read, since real testing across
+ *         several earlier per-device designs showed attribute reads from the app across
+ *         a wait were simply not reliable here, regardless of the exact wait shape tried.
+ * 1.5.1 - Real hardware test with an unplugged Pro and a powered-on Aura came back
+ *         completely swapped - the unplugged unit "confirmed" and the powered one
+ *         "no_response". Log timestamps suggest deviceList() may have run its probing
+ *         sequence twice in close succession (Hubitat's dynamicPage/content methods are
+ *         known to sometimes execute more than once per page load) - a second overlapping
+ *         call to probeAllDevices() would overwrite state.currentProbeDni/
+ *         probeBeforeTime while the FIRST run's scheduled probeQueueSendOff/
+ *         probeQueueFinalize steps were still pending, causing a stale callback to
+ *         misattribute one device's real echo to a different device's confirmation
+ *         window. probeAllDevices() now calls unschedule() on both scheduled step names
+ *         before starting, so only one probing run can ever be in flight at a time.
+ * 1.5.2 - Added getEntityAttributesFor(dni), called by the app right after creating a
+ *         device: returns exactly which attributes THIS specific unit has (Aura vs Pro
+ *         differ), excluding button/event entities which have no persistent state. Used
+ *         by the app to pre-populate every known attribute with a "pending" placeholder
+ *         immediately on creation, rather than leaving the driver page blank. No other
+ *         changes in this file - the live-message path is untouched from 1.5.1.
+ * 2.0.0 - Changelog cleanup only, no functional changes from 1.5.2: removed entries
+ *         (1.2.1-1.2.2, 1.3.0-1.4.1) that described a fix-then-revert with zero net
+ *         effect on this file (1.2.1's blank-password guard, undone by 1.2.2), and an
+ *         entire earlier generation of the device-confirmation feature - probeDevice()/
+ *         probeSendOff()/probeFinalize() and the probeResult attribute - that was
+ *         completely removed and replaced by probeAllDevices() in 1.5.0. None of that
+ *         code exists anymore, so keeping the changelog entries around would only
+ *         mislead anyone reading this history looking for how the current code works.
+ * 2.0.1 - Fixed unbounded state growth (724KB+ within a few hours of real use) traced
+ *         to state.seenTopics, used only by the auditTopics() diagnostic tool. It was
+ *         tracked as a Set, appended to on every single MQTT message - but Hubitat
+ *         persists state as JSON, which has no native Set type, so a Set can silently
+ *         come back as a plain List after being saved and reloaded, at which point <<
+ *         stops deduplicating and just appends the same handful of topics forever,
+ *         once per message. Switched to a Map (topic -> true), whose keys can't have
+ *         that ambiguity regardless of how the underlying type round-trips. initialize()
+ *         also auto-resets any already-bloated seenTopics left over from before this
+ *         fix, so existing installs clean up automatically without a manual cache clear.
+ * 2.0.2 - Real testing showed state size still climbing well after the seenTopics fix
+ *         (2 devices already past a YoLink Listener install's size with 19 devices),
+ *         even with every attribute confirmed populated - meaning something is still
+ *         adding new keys rather than only overwriting existing ones, despite every
+ *         structure reviewed in code looking properly bounded. Added auditStateSize(),
+ *         a new command that logs the key-count of every individual structure in state
+ *         plus a rough total serialized size, so the actual leak can be pinpointed from
+ *  *         real data (comparing two runs over time) instead of further guessing.
+ * 2.0.3 - Found the real leak via auditStateSize(): seenTopics had 654 entries against
+ *         only 25 in topicToEntity - a 26x gap, with 2 devices already exceeding a
+ *         19-device YoLink Listener install's entire state size. Root cause: this
+ *         device subscribes to the whole "homeassistant/#" wildcard (needed for its own
+ *         discovery), which also receives traffic from any OTHER device exposed through
+ *         the same shared broker - very likely Hubitat's own MQTT Export Integration
+ *         publishing other Hubitat devices (lights, fans, Hue Bridge, etc.) under that
+ *         same tree for Home Assistant compatibility. seenTopics was tracking every
+ *         single one of those, completely unrelated to InvisOutlet, which is why it
+ *         kept growing independent of whether InvisOutlet's own attributes had all
+ *         been seen. Now only tracks topics that actually look like InvisOutlet's own -
+ *         its real state topics live under "intecular/...", its discovery/config topics
+ *         have "invisoutlet-..." in the object id. initialize() also retroactively
+ *         prunes anything already tracked that doesn't match, cleaning up existing
+ *         installs automatically.
  */
 
 import groovy.json.JsonSlurper
 import groovy.transform.Field
 
-def clientVersion() { "1.1.1" }
+def clientVersion() { "2.0.3" }
 private def copyright() { return "<br>© 2026-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved." }
 def driverName() { "InvisOutlet MQTT Listener" }
 def activeScale() { (parent?.getTemperatureScale() == "F") ? "Fahrenheit (°F)" : "Celsius (°C)" }
@@ -61,12 +145,15 @@ metadata {
 
         attribute "connectionStatus", "string"
         attribute "deviceCount", "number"
+        attribute "portTestResult", "string"
 
         command "connect"
         command "disconnect"
         command "resubscribe"
         command "clearDiscoveryCache"
         command "auditTopics"
+        command "auditStateSize"
+        command "testPort", [[name:"ip", type:"STRING"], [name:"port", type:"NUMBER"]]
     }
 
     preferences {
@@ -93,6 +180,27 @@ def installed() {
 def initialize() {
     if (state.topicToEntity == null) state.topicToEntity = [:]
     if (state.discovered == null) state.discovered = [:]
+    // One-time cleanup: seenTopics used to be tracked as a Set, which could silently
+    // balloon into a huge duplicate-laden List across state persistence (see 2.0.1
+    // changelog). If it's not already the current Map shape, reset it clean.
+    if (state.seenTopics != null && !(state.seenTopics instanceof Map)) {
+        log.info "Resetting bloated seenTopics tracking (was a Set/List, now a Map) - see 2.0.1 changelog"
+        state.seenTopics = [:]
+    }
+    // One-time cleanup: seenTopics used to track EVERY topic seen on the shared
+    // "homeassistant/#" wildcard, not just InvisOutlet's own - including any other
+    // device also exposed through the same broker (see 2.0.3 changelog). Prune
+    // anything already tracked that doesn't actually look like ours.
+    if (state.seenTopics instanceof Map) {
+        def filtered = state.seenTopics.findAll { t, v ->
+            def tl = t.toString().toLowerCase()
+            tl.contains("intecular") || tl.contains("invis")
+        }
+        if (filtered.size() != state.seenTopics.size()) {
+            log.info "Pruned ${state.seenTopics.size() - filtered.size()} non-InvisOutlet topic(s) from seenTopics tracking - see 2.0.3 changelog"
+            state.seenTopics = filtered
+        }
+    }
     connect()
 }
 
@@ -193,6 +301,13 @@ def mqttClientStatus(String status) {
 // ---------------- incoming messages ----------------
 
 def parse(String description) {
+    // A port test in progress means this callback is from the Raw Socket interface, not
+    // MQTT - any incoming data at all proves the target is open and responding.
+    if (state.portTestActive) {
+        if (state.awaitingPortTestResult) finalizePortTest("open")
+        return
+    }
+
     def msg
     try {
         msg = interfaces.mqtt.parseMessage(description)
@@ -206,8 +321,20 @@ def parse(String description) {
 
     if (rawTrafficLogging) log.info "RAW MQTT: topic='${topic}' payload='${payload}'"
 
-    if (state.seenTopics == null) state.seenTopics = [] as Set
-    state.seenTopics << topic
+    // Only track topics that are actually InvisOutlet-related - real testing showed
+    // this ballooning to 600+ entries with just 2 devices, versus ~25 in topicToEntity,
+    // because the "homeassistant/#" wildcard this device subscribes to (needed for its
+    // own discovery) also receives traffic from any OTHER device exposed through the
+    // same shared broker (e.g. Hubitat's own MQTT Export Integration publishing other
+    // Hubitat devices under that same tree for Home Assistant compatibility) - none of
+    // which this diagnostic tool has any use for. InvisOutlet's real state topics live
+    // under "intecular/...", and its discovery/config topics have "invisoutlet-..." in
+    // the object id - a topic matching neither isn't ours, so don't bother tracking it.
+    def topicLower = topic.toString().toLowerCase()
+    if (topicLower.contains("intecular") || topicLower.contains("invis")) {
+        if (state.seenTopics == null) state.seenTopics = [:]
+        state.seenTopics[topic] = true
+    }
 
     try {
         if (topic.startsWith("${prefix}/") && topic.endsWith("/config")) {
@@ -218,6 +345,56 @@ def parse(String description) {
     } catch (e) {
         log.error "Error handling MQTT message on ${topic}: ${e}"
     }
+}
+
+// ---------------- broker port test (used by the app before real MQTT setup) ----------------
+
+// Opens a raw TCP socket to check whether something is listening - used to auto-detect
+// Hubitat's built-in MQTT broker before any real broker details have been entered. Only
+// ever runs before initialize()/connect() are called for real, so there's no risk of this
+// colliding with an active MQTT session on the same device.
+def testPort(String ip, port) {
+    def portNum = port as Integer
+    if (logEnable) log.debug "Testing port ${ip}:${portNum}"
+    state.portTestActive = true
+    state.awaitingPortTestResult = true
+    state.sawPortTestError = false
+    sendEvent(name: "portTestResult", value: "testing")
+
+    try { interfaces.rawSocket.close() } catch (ignored) { }
+
+    try {
+        interfaces.rawSocket.connect(ip, portNum)
+    } catch (e) {
+        if (logEnable) log.debug "Immediate connect failure to ${ip}:${portNum}: ${e}"
+        finalizePortTest("closed")
+        return
+    }
+    runInMillis(1200, "portTestTimeoutCheck")
+}
+
+def portTestTimeoutCheck() {
+    if (state.awaitingPortTestResult) finalizePortTest(state.sawPortTestError ? "closed" : "open")
+}
+
+// Raw Socket interface's status callback - only meaningful while a port test is active,
+// since MQTT connection status comes through mqttClientStatus() instead.
+def socketStatus(String status) {
+    if (!state.portTestActive) return
+    if (logEnable) log.debug "socketStatus (port test): ${status}"
+    def lower = status?.toLowerCase() ?: ""
+    if (lower.contains("error") || lower.contains("fail") || lower.contains("refused") || lower.contains("reset")) {
+        state.sawPortTestError = true
+        if (state.awaitingPortTestResult) finalizePortTest("closed")
+    }
+}
+
+private finalizePortTest(String result) {
+    state.awaitingPortTestResult = false
+    state.portTestActive = false
+    sendEvent(name: "portTestResult", value: result)
+    try { interfaces.rawSocket.close() } catch (ignored) { }
+    if (logEnable) log.debug "Port test result: ${result}"
 }
 
 def handleDiscoveryMessage(String topic, String payload) {
@@ -471,6 +648,22 @@ def getDiscoveredDevices() {
     return result
 }
 
+// Called by the app right after creating a device, so it knows exactly which attributes
+// THIS specific unit has (Aura vs Pro differ) and can pre-populate each with a "pending"
+// placeholder instead of leaving the driver page blank until a real value arrives.
+// Excludes "event" platform entities (button presses) - those are momentary triggers
+// with no persistent state to show as pending.
+def getEntityAttributesFor(String dni) {
+    def entityMap = state.discovered ? state.discovered[dni]?.entities : null
+    if (!entityMap) return []
+    def result = []
+    entityMap.each { attrName, meta ->
+        if (meta.platform == "event") return
+        result << [attr: attrName, platform: meta.platform, deviceClass: meta.deviceClass, unit: meta.unit]
+    }
+    return result
+}
+
 // ---------------- state updates ----------------
 
 // Some devices/firmwares publish more than one confirmation message per action
@@ -514,6 +707,17 @@ def handleStateMessage(String topic, String payload) {
         def entityMap = state.discovered ? state.discovered[entry.dni]?.entities : null
         def meta = entityMap ? entityMap[entry.attr] : null
         if (!meta) return
+
+        // Checked unconditionally, before the isActive gate below - during probing
+        // (probeAllDevices()), a device isn't marked active yet, so if this lived after
+        // that gate it would never see the echo the probe is specifically waiting for.
+        // Records the last time ANY value arrived for this exact dni+attribute,
+        // regardless of active/probe status - used by probeQueueFinalize() to detect a
+        // real echo via a before/after comparison, read from its own freshly-scheduled
+        // runInMillis execution (a genuinely new top-level execution), not from within
+        // a paused method body.
+        if (state.lastAttrSeen == null) state.lastAttrSeen = [:]
+        state.lastAttrSeen["${entry.dni}|${entry.attr}"] = now()
 
         if (state.lastNotifySeen == null) state.lastNotifySeen = [:]
         state.lastNotifySeen[entry.dni] = now()
@@ -700,6 +904,110 @@ def entityMeta(String dni, String attrName) {
     return entityMap ? entityMap[attrName] : null
 }
 
+// Actively confirms every discovered device is still real and reachable, rather than
+// passively waiting to see if it happens to publish something within some timeout.
+// InvisHome does not appear to clear a device's retained MQTT discovery message when
+// it's removed from the phone app - that message can keep sitting on the broker
+// indefinitely, completely independent of whether the physical unit still exists,
+// which means passive "have we heard anything recently" timing can't tell a genuinely
+// removed device apart from one that's simply quiet for a moment. This briefly
+// commands each device's nightlight on then off (every InvisOutlet model has one -
+// Pro's plain nightlight and Aura's colorlight both map to the same "nightlight"
+// attribute) and watches for a real MQTT state echo confirming the command actually
+// took effect on real hardware, not just that the broker accepted a publish.
+//
+// Probes the WHOLE queue of dnis internally, one at a time, entirely on this device -
+// the app only calls this ONCE and reads getProbeResults() ONCE afterward, rather than
+// going back and forth per-device, which real testing showed was unreliable regardless
+// of exact wait shape. Each device's own confirm logic below (comparing a before/after
+// timestamp from probeQueueFinalize's own fresh runInMillis execution) only needs the
+// app to read a plain method call return value (getProbeResults()) once at the very end.
+def probeAllDevices(List<String> dnis) {
+    // Cancels any pending runInMillis steps left over from a PREVIOUS call to this
+    // method that might still be scheduled - Hubitat's dynamicPage/content methods are
+    // known to sometimes execute more than once per single page load, and if
+    // probeAllDevices() got called a second time while the first run's scheduled steps
+    // (probeQueueSendOff/probeQueueFinalize) were still pending, those stale callbacks
+    // would later fire using state values that this NEW call is about to overwrite -
+    // misattributing one device's real echo to a completely different device's
+    // confirmation window. Only one probing run should ever be in flight at a time.
+    unschedule("probeQueueSendOff")
+    unschedule("probeQueueFinalize")
+
+    state.probeQueue = new ArrayList(dnis ?: [])
+    state.probeResults = [:]
+    if (state.lastAttrSeen == null) state.lastAttrSeen = [:]
+    probeNextInQueue()
+}
+
+def probeNextInQueue() {
+    def queue = state.probeQueue ?: []
+    if (queue.isEmpty()) {
+        log.info "Probing complete: ${state.probeResults}"
+        return
+    }
+
+    def dni = queue.remove(0)
+    state.probeQueue = queue
+    state.currentProbeDni = dni
+
+    def meta = entityMeta(dni, "nightlight")
+    if (!meta?.commandTopic) {
+        log.warn "Probe for ${dni}: no 'nightlight' entity found in the discovery catalog (or it has no command topic) - this usually means discovery for this device hasn't completed yet, not that the hardware itself is unreachable"
+        state.probeResults[dni] = "unsupported"
+        probeNextInQueue()
+        return
+    }
+
+    def key = "${dni}|nightlight"
+    state.probeBeforeTime = (state.lastAttrSeen[key] ?: 0) as Long
+
+    def onPayload = meta.payloadOn ?: "ON"
+    log.info "Probing ${dni}: publishing '${onPayload}' to ${meta.commandTopic}"
+    interfaces.mqtt.publish(meta.commandTopic, onPayload)
+
+    runInMillis(1500, "probeQueueSendOff")
+}
+
+def probeQueueSendOff() {
+    def dni = state.currentProbeDni
+    def meta = entityMeta(dni, "nightlight")
+    if (meta?.commandTopic) {
+        def offPayload = meta.payloadOff ?: "OFF"
+        log.info "Probing ${dni}: publishing '${offPayload}' to ${meta.commandTopic}"
+        interfaces.mqtt.publish(meta.commandTopic, offPayload)
+    }
+    runInMillis(1500, "probeQueueFinalize")
+}
+
+def probeQueueFinalize() {
+    def dni = state.currentProbeDni
+    def key = "${dni}|nightlight"
+    def afterTime = (state.lastAttrSeen[key] ?: 0) as Long
+    def result = (afterTime > (state.probeBeforeTime as Long)) ? "confirmed" : "no_response"
+    state.probeResults[dni] = result
+    log.info "Probe result for ${dni}: ${result}"
+    probeNextInQueue()
+}
+
+// Called by the app ONCE, after waiting out the expected total probing duration -
+// a plain method call returning a value directly, not an attribute/currentValue()
+// read, since that mechanism is what turned out to be unreliable across the wait.
+def getProbeResults() {
+    return state.probeResults ?: [:]
+}
+
+// Lets the app compute how long to wait: unsupported devices resolve instantly, real
+// probes take ~3s each (two 1500ms steps), run strictly one at a time.
+def estimateProbeDurationMs(List<String> dnis) {
+    def total = 0
+    (dnis ?: []).each { dni ->
+        def meta = entityMeta(dni, "nightlight")
+        total += meta?.commandTopic ? 3200 : 50
+    }
+    return total
+}
+
 def publishSwitch(String dni, String attrName, boolean turnOn) {
     def meta = entityMeta(dni, attrName)
     if (!meta?.commandTopic) {
@@ -757,7 +1065,7 @@ def publishColorTemp(String dni, String attrName, kelvin) {
 def clearDiscoveryCache() {
     state.discovered = [:]
     state.topicToEntity = [:]
-    state.seenTopics = [] as Set
+    state.seenTopics = [:]
     state.skippedTopics = [:]
     state.lastRawTemp = [:]
     state.lastRawDistanceCm = [:]
@@ -772,7 +1080,7 @@ def clearDiscoveryCache() {
 // even reached a skip check. Run this, then toggle whatever feature you're trying to
 // find (e.g. a light effect) and run it again - the new/changed line is your answer.
 def auditTopics() {
-    def seen = (state.seenTopics ?: []) as Set
+    def seen = (state.seenTopics?.keySet() ?: []) as Set
     def known = (state.topicToEntity?.keySet() ?: []) as Set
     def skipped = state.skippedTopics ?: [:]
 
@@ -795,4 +1103,39 @@ def auditTopics() {
         log.info "Nothing unaccounted for - every topic seen so far is either wired up or was never published."
     }
     log.info "=== end audit ==="
+}
+
+// Logs the key-count of every individual structure kept in state, plus a rough total
+// serialized size - run this and compare against a later run to see EXACTLY which
+// structure is actually growing, rather than guessing. Every structure here is
+// supposed to be bounded by (number of devices) x (number of attributes), overwriting
+// existing keys rather than appending new ones once discovery has settled - if one of
+// these counts keeps climbing well past that expectation, that's the leak.
+def auditStateSize() {
+    def counts = [
+        topicToEntity     : state.topicToEntity?.size() ?: 0,
+        discovered        : state.discovered?.size() ?: 0,
+        seenTopics        : state.seenTopics?.size() ?: 0,
+        skippedTopics     : state.skippedTopics?.size() ?: 0,
+        lastRawTemp       : state.lastRawTemp?.size() ?: 0,
+        lastRawDistanceCm : state.lastRawDistanceCm?.size() ?: 0,
+        lastNotifySeen    : state.lastNotifySeen?.size() ?: 0,
+        lastForwardTime   : state.lastForwardTime?.size() ?: 0,
+        lastValueTime     : state.lastValueTime?.size() ?: 0,
+        lastAttrSeen      : state.lastAttrSeen?.size() ?: 0,
+        activeDnis        : state.activeDnis?.size() ?: 0,
+        probeQueue        : state.probeQueue?.size() ?: 0,
+        probeResults      : state.probeResults?.size() ?: 0
+    ]
+
+    log.info "=== InvisOutlet state size audit ==="
+    counts.each { name, count -> log.info "  ${name}: ${count} key(s)" }
+
+    try {
+        def json = groovy.json.JsonOutput.toJson(state)
+        log.info "Total serialized state size: ${json.length()} bytes (Hubitat's own reported number may differ slightly, but should track closely)"
+    } catch (e) {
+        log.warn "Could not compute serialized size directly: ${e}"
+    }
+    log.info "=== end state size audit ==="
 }
