@@ -5,7 +5,10 @@
  *  (24 entities). Shares a board family with the washer -- the listener
  *  disambiguates on device name, not board family.
  *
- *  Version: 0.5.0
+ *  Attribute names follow the HubiThings Replica Samsung Dryer driver so
+ *  Rule Machine rules carry over; see attrRenames().
+ *
+ *  Version: 0.6.0
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -16,19 +19,22 @@ metadata {
         capability "EnergyMeter"
         capability "Refresh"
 
-        attribute "machineState",    "string"
+        // HubiThings Replica names (Samsung Dryer)
+        attribute "switch",               "string"
+        attribute "machineState",         "string"
+        attribute "dryerJobState",        "string"
+        attribute "completionTime",       "string"
+        attribute "timeRemaining",        "string"
+        attribute "dryerDryLevel",        "string"
+        attribute "dryerWrinklePrevent",  "string"
+        attribute "lockState",            "string"
+        attribute "remoteControlEnabled", "string"
+
+        // No Replica equivalent
         attribute "running",         "string"
-        attribute "power",           "string"
-        attribute "progress",        "string"
         attribute "progressPercent", "number"
-        attribute "completionTime",  "number"
-        attribute "estimatedFinish", "string"
         attribute "cycle",           "string"
-        attribute "dryLevel",        "string"
         attribute "delayStart",      "number"
-        attribute "childLock",       "string"
-        attribute "smartControl",    "string"
-        attribute "wrinklePrevent",  "string"
         attribute "dryerType",       "string"
         attribute "buzzerSound",     "string"
 
@@ -39,10 +45,9 @@ metadata {
         command "stop"
         command "pause"
         command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
-        command "setDryLevel", [[name: "Dry level*", type: "STRING", description: "See the 'Dry Level' state variable for this appliance's options"]]
+        command "setDryerDryLevel", [[name: "Dry level*", type: "STRING", description: "See the 'Dry Level' state variable for this appliance's options"]]
         command "setDelayStart", [[name: "Hours*",     type: "NUMBER"]]
-        command "wrinklePreventOn"
-        command "wrinklePreventOff"
+        command "setDryerWrinklePrevent", [[name: "Wrinkle prevent*", type: "ENUM", constraints: ["off", "on"]]]
         command "setBuzzerSound", [[name: "Buzzer*", type: "STRING", description: "See the 'Buzzer Sound' state variable for this appliance's options"]]
         command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
                                     [name: "Option*", type: "STRING"]]
@@ -57,6 +62,21 @@ metadata {
 }
 
 #include almulder.SAS-Samsung-Appliance-Common
+
+/** Library hook: this driver's names -> HubiThings Replica names. */
+Map attrRenames() {
+    return [
+        "power"          : "switch",
+        "machineState"   : [name: "machineState", values: RV_MACHINE_STATE],
+        "progress"       : [name: "dryerJobState", values: RV_DRYER_JOB],
+        "estimatedFinish": [name: "completionTime", format: "isoZ"],
+        "completionTime" : [name: "timeRemaining", format: "hms"],
+        "dryLevel"       : "dryerDryLevel",
+        "wrinklePrevent" : "dryerWrinklePrevent",
+        "childLock"      : [name: "lockState", values: RV_LOCK],
+        "smartControl"   : [name: "remoteControlEnabled", values: RV_BOOL]
+    ]
+}
 
 void installed() { log.info "${device.displayName} installed" }
 void updated() { log.info "${device.displayName} updated" }
@@ -85,12 +105,11 @@ void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
 
 void setCycle(String v)    { setSelectOption("cycle", v) }
-void setDryLevel(String v) { setSelectOption("dry_level", v) }
+void setDryerDryLevel(String v) { setSelectOption("dry_level", v) }
 
 void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
 
-void wrinklePreventOn()  { haTurnOn("wrinkle_prevent") }
-void wrinklePreventOff() { haTurnOff("wrinkle_prevent") }
+void setDryerWrinklePrevent(String v) { setSwitchOption("wrinkle_prevent", v) }
 
 
 // --- settings -----------------------------------------------------------

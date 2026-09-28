@@ -90,16 +90,25 @@ strips the scheme, path and port for you.
 ## What you get
 
 **One device per appliance.** A range with two oven cavities is still one
-device — the second cavity arrives as `cavity2*` attributes rather than a
-seventh appliance.
+device. `ovenCavityStatus` says whether the divider is in: with it out the
+main attributes are the whole oven, with it in they are the upper oven and
+the lower oven arrives as `lowerOven*` attributes. Wall ovens with a divider
+work the same way on the Oven driver.
 
-**Attributes worth automating on**, named from the entity rather than a
-hardcoded list, so an entity LocalThings adds later shows up on its own:
-`machineState`, `running`, `door`/`contact`, `progressPercent`,
-`completionTime`, `estimatedFinish`, `energy`, temperatures, and so on.
+**HubiThings Replica names.** Where a HubiThings Replica driver exists for
+the appliance (washer, dryer, dishwasher, refrigerator, oven/range), the
+attributes and commands use Replica's names — `machineState`,
+`washerJobState`, `completionTime`, `timeRemaining`, `lockState`,
+`remoteControlEnabled`, `operatingState`, `ovenSetpoint` and so on — so rules
+written against Replica carry over. Values are translated where Replica's
+differed (`machineState` reads `run`/`stop`/`pause`, `lockState` reads
+`locked`/`unlocked`).
+
+**Everything else is named from the entity** rather than a hardcoded list, so
+an entity LocalThings adds later shows up on its own.
 
 **Commands** for everything writable — `start`, `stop`, `pause`, `setCycle`,
-`setSpinSpeed`, `setCoolerSetpoint`, and the rest.
+`setWasherSpinLevel`, `setCoolerSetpoint`, and the rest.
 
 **A state variable per selectable setting**, listing exactly what *your*
 appliance offers:
@@ -110,7 +119,7 @@ Spin Speed:           Rinse hold, No spin, Extra Low, Low, Medium, High, Extra H
 Wash Temperature:     None, Tap Cold, Cold, Warm, Hot, Extra hot
 ```
 
-The matching command takes that text — `setSpinSpeed("Extra High")` — or the
+The matching command takes that text — `setWasherSpinLevel("Extra High")` — or the
 raw device code, so a rule can use either. Names come from Home Assistant's own
 translation table at run time, so they match what HA shows and they are right
 for whatever board your appliance has.

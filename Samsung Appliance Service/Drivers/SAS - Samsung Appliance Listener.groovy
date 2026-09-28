@@ -5,7 +5,7 @@
  *  Service, discovers LocalThings appliances, creates one Hubitat child per
  *  appliance, and routes entity state to the right child.
  *
- *  Version: 0.4.3
+ *  Version: 0.4.6
  *  Author:  Albert Mulder (almulder)
  *
  *  Design notes
@@ -43,7 +43,7 @@
 import groovy.json.JsonOutput
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.4.2"
+@Field static final String DRIVER_VERSION = "0.4.6"
 
 // Reconnect backoff ladder, seconds.
 @Field static final List<Integer> BACKOFF = [5, 10, 20, 40, 80, 160, 300]
@@ -171,6 +171,7 @@ private String socketUrl() {
 }
 
 void connect() {
+    state.lastConnectMs = now()
     sendEvent(name: "connection", value: "connecting")
     String url = socketUrl()
     if (logEnable) log.debug "connecting to ${url}"
@@ -183,6 +184,7 @@ void connect() {
 }
 
 private void closeSocket() {
+    state.closingOnPurpose = true
     try { interfaces.webSocket.close() } catch (ignored) { }
     state.authed = false
 }
@@ -192,10 +194,20 @@ void webSocketStatus(String status) {
     if (status.startsWith("status: open")) {
         state.lastRxMs   = now()
         state.backoffIdx = 0
+        // A close we asked for with no socket open never reports back.
+        state.closingOnPurpose = false
         // Do not mark connected yet -- HA will send auth_required first.
     } else if (status.startsWith("status: closing")) {
         state.authed = false
         sendEvent(name: "connection", value: "disconnected")
+        // Home Assistant closes the socket cleanly when it restarts. Only a
+        // close we asked for (initialize, uninstall) may end here.
+        if (state.closingOnPurpose) {
+            state.closingOnPurpose = false
+        } else {
+            log.warn "Home Assistant closed the connection"
+            scheduleReconnect()
+        }
     } else if (status.startsWith("failure")) {
         state.authed = false
         sendEvent(name: "connection", value: "disconnected")
@@ -214,7 +226,17 @@ private void scheduleReconnect() {
 
 void healthCheck() {
     Long last = (state.lastRxMs ?: 0L) as Long
-    if (!state.authed) return
+    if (!state.authed) {
+        // Longer than the longest backoff step, so this only catches a
+        // listener that nothing else is going to reconnect.
+        Long tried = (state.lastConnectMs ?: 0L) as Long
+        if (now() - tried > 360000L) {
+            log.warn "not connected to Home Assistant -- trying again"
+            state.backoffIdx = 0
+            connect()
+        }
+        return
+    }
     if (now() - last > 120000L) {
         log.warn "no traffic from Home Assistant in 2 minutes -- reconnecting"
         state.backoffIdx = 0
@@ -340,6 +362,12 @@ private void handleResult(Map msg) {
 
     if (msg.success == false) {
         log.error "request ${purpose ?: msg.id} failed: ${msg.error?.message}"
+        if (purpose == "entity_meta") {
+            // Fill the devices in anyway rather than leave them empty;
+            // without categories, diagnostic entities simply show.
+            state.metaReady = true
+            seedStates()
+        }
         return
     }
 
@@ -360,8 +388,7 @@ private void handleResult(Map msg) {
 
         case "entity_meta":
             storeEntityMeta((Map) msg.result)
-            // Everything routed before this point used fallbacks; do it again
-            // now that the real categories and translation keys are known.
+            // The first fill-in waits for this; deliver it now.
             seedStates()
             break
 
@@ -380,7 +407,8 @@ private void handleEvent(Map msg) {
     if (!data) return
     Map newState = (Map) data.new_state
     if (!newState) return
-    routeEntity((String) data.entity_id, newState)
+    if (state.metaReady != true) return      // the first fill-in is on its way
+    routeEntity((String) data.entity_id, newState, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +427,12 @@ private void storeDeviceRegistry(List registry) {
             if (ident instanceof List && ident.any { it?.toString()?.toLowerCase() == "localthings" }) mine = true
         }
         if (!mine) return
+        String ident = null
+        d.identifiers?.each { i ->
+            if (i instanceof List && i.size() >= 2 && i[0]?.toString()?.toLowerCase() == "localthings") {
+                ident = i[1]?.toString()
+            }
+        }
         // Use `name`, NOT `name_by_user`: after a rename name_by_user no longer
         // matches the entity_id prefix, and the prefix is how we route.
         String name = d.name as String
@@ -406,10 +440,29 @@ private void storeDeviceRegistry(List registry) {
             id:    d.id as String,
             name:  name,
             slug:  slugify(name),
+            ident: ident,
             model: d.model as String,
             via:   d.via_device_id as String,
             type:  detectType(name, d.model as String)
         ]
+    }
+
+    // A subdevice's identifier is its parent's plus "_<key>", which never
+    // changes, unlike its name: LocalThings 0.28 renamed a range's second
+    // cavity from "... Subdevice 1" to "... Lower oven", and Home Assistant
+    // keeps an entity's id when its device is renamed. So each subdevice
+    // also answers to the prefix its older entities carry, and gets a scope
+    // built from its key rather than its name.
+    devices.each { k, v ->
+        List<String> slugs = [(String) v.slug]
+        Map parent = v.via ? (Map) devices[v.via] : null
+        String pid = parent?.ident
+        String sid = v.ident
+        if (pid && sid && sid.startsWith(pid + "_")) {
+            v.subKey = sid.substring(pid.length() + 1)
+            slugs << slugify("${parent.name} Subdevice ${v.subKey}")
+        }
+        v.slugs = slugs.unique()
     }
     state.devices = devices
     log.info "device registry: ${devices.size()} LocalThings device(s) found"
@@ -443,10 +496,11 @@ private void storeDeviceRegistry(List registry) {
     [tokens: ["range hood", "hood"],             type: "Range Hood"],
     [tokens: ["induction"],                      type: "Induction Cooktop"],
     [tokens: ["cooktop"],                        type: "Cooktop"],
-    // "Oven" before "range": a range/oven combo is named Range, but a
-    // standalone wall oven is its own upstream registry and its own driver.
-    [tokens: ["oven"],                           type: "Oven"],
+    // "Range" before "oven": a range is the oven + cooktop combo, and its
+    // name may mention the oven too. An oven on its own gets the Oven
+    // driver; a cooktop on its own is caught by the cooktop rows above.
     [tokens: ["range"],                          type: "Range"],
+    [tokens: ["oven"],                           type: "Oven"],
     [tokens: ["air conditioner", "airconditioner", "a/c"], type: "Air Conditioner"],
     [tokens: ["air purifier"],                   type: "Air Purifier"],
     [tokens: ["air monitor"],                    type: "Air Monitor"],
@@ -516,7 +570,7 @@ private void storeTranslations(Map resources) {
         String code = rest.substring(at + ".state.".length())
         Map t = (Map) tables[table]
         if (t == null) { t = [:]; tables[table] = t }
-        t[code] = v?.toString()
+        t[normCode(code)] = v?.toString()
         names++
     }
     state.labelTables = tables
@@ -565,10 +619,14 @@ String labelFor(String entityId, def code) {
     String tk = meta?.tk
     if (!tk) return null
     Map table = (state.labelTables instanceof Map) ? (Map) state.labelTables[tk] : null
-    def hit = table?.get(code.toString())
+    def hit = table?.get(normCode(code))
     if (hit) return hit.toString()
-    // Names Home Assistant does not have yet, contributed from a real panel.
-    return fallbackLabel(tk, code.toString())
+    // Only select tables are worth reporting: a sensor with a translation key
+    // has no table here, and neither does an unknown/unavailable state.
+    if (table != null && !LABEL_NULL_STATES.contains(normCode(code))) {
+        noteUnlabeled(tk, code.toString())
+    }
+    return null
 }
 
 /**
@@ -581,12 +639,9 @@ String selectCodeFor(String entityId, String value) {
     String tk = meta?.tk
     if (!tk) return value
     Map table = (state.labelTables instanceof Map) ? (Map) state.labelTables[tk] : [:]
-    if (table?.containsKey(value)) return value            // already a raw code
+    if (table?.containsKey(normCode(value))) return value  // already a raw code
     def hit = table?.find { k, v -> v.toString() == value }
-    if (hit) return hit.key.toString()
-    Map fb = fallbackTable(tk)
-    def fhit = fb?.find { k, v -> v.toString() == value }
-    return fhit ? fhit.key.toString() : value
+    return hit ? hit.key.toString() : value
 }
 
 // ---------------------------------------------------------------------------
@@ -617,21 +672,30 @@ void seedResponse(hubitat.scheduling.AsyncResponse resp, Map cbData) {
         log.error "could not parse /api/states: ${e.message}"
         return
     }
+    // First connect, or after a rediscovery: learn which entities are ours,
+    // then ask Home Assistant for their categories and name tables BEFORE
+    // handing anything to a device, so nothing is routed on a guess. The
+    // registry's answer triggers this seed again, which then delivers.
+    boolean deliver = (state.metaReady == true)
     int routed = 0
     List<String> mine = []
     states.each { Map s ->
-        if (routeEntity((String) s.entity_id, s)) {
+        if (routeEntity((String) s.entity_id, s, deliver)) {
             routed++
             mine << (String) s.entity_id
         }
+    }
+    if (!deliver) {
+        if (mine) {
+            log.info "found ${routed} appliance entities -- asking Home Assistant which are diagnostic"
+            requestEntityMeta(mine)
+        }
+        return
     }
     state.seeded = true
     log.info "seeded ${routed} appliance entities from ${states.size()} Home Assistant entities"
     sendEvent(name: "lastMessage", value: "seeded ${routed} entities")
 
-    // First connect, or after a rediscovery: now that the appliance entity ids
-    // are known, ask the registry which name table and category each one uses.
-    if (state.metaReady != true) requestEntityMeta(mine)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,19 +706,27 @@ void seedResponse(hubitat.scheduling.AsyncResponse resp, Map cbData) {
  * Resolve an entity to its owning device by longest slug prefix, then hand it
  * to that appliance's child. Returns true when it belonged to us.
  */
-private Boolean routeEntity(String entityId, Map stateObj) {
+private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
     if (!entityId) return false
     Map devices = (state.devices instanceof Map) ? state.devices : [:]
     if (!devices) return false
 
     String obj = entityId.contains(".") ? entityId.substring(entityId.indexOf(".") + 1) : entityId
 
+    // Longest matching prefix wins, over every name a device answers to --
+    // that is what sends "<range> Subdevice 1 ..." to the cavity, not the range.
     Map best = null
+    String bestSlug = null
     devices.each { k, v ->
-        String slug = v.slug
-        if (!slug) return
-        if (obj == slug || obj.startsWith(slug + "_")) {
-            if (best == null || slug.length() > ((String) best.slug).length()) best = (Map) v
+        List slugs = (v.slugs instanceof List) ? (List) v.slugs : [v.slug]
+        slugs.each { s ->
+            String slug = s as String
+            if (!slug) return
+            if ((obj == slug || obj.startsWith(slug + "_")) &&
+                    (bestSlug == null || slug.length() > bestSlug.length())) {
+                best = (Map) v
+                bestSlug = slug
+            }
         }
     }
     if (best == null) return false
@@ -665,14 +737,21 @@ private Boolean routeEntity(String entityId, Map stateObj) {
     String scope = "main"
     if (best.via && devices[best.via]) {
         owner = (Map) devices[best.via]
-        String remainder = ((String) best.slug).substring(((String) owner.slug).length()).replaceAll(/^_+/, "")
-        scope = snakeToCamel(remainder) ?: "sub"
+        if (best.subKey) {
+            scope = snakeToCamel("subdevice_${best.subKey}")     // "subdevice1"
+        } else {
+            String os = (String) owner.slug
+            String bs = (String) best.slug
+            String remainder = bs.startsWith(os) ? bs.substring(os.length()).replaceAll(/^_+/, "") : bs
+            scope = snakeToCamel(remainder) ?: "sub"
+        }
     }
 
     def child = getChildDevice(childDni((String) owner.id))
     if (!child) return false
+    if (!deliver) return true
 
-    String suffix = suffixOf(entityId, (String) best.name)
+    String suffix = (obj == bestSlug) ? "" : obj.substring(bestSlug.length() + 1)
     Map attrs = (stateObj.attributes instanceof Map) ? (Map) stateObj.attributes : [:]
 
     Map payload = [
@@ -684,6 +763,10 @@ private Boolean routeEntity(String entityId, Map stateObj) {
         unit     : attrs.unit_of_measurement,
         deviceClass : attrs.device_class,
         options  : attrs.options,
+        // Fan speed: HA reports a percentage in steps of 100/speed_count
+        // (25 for the microwave vent's four speeds).
+        percentage     : attrs.percentage,
+        percentageStep : attrs.percentage_step,
         entityCategory : categoryFor(entityId, suffix),
         // Resolved here, not in the child: only the listener holds the
         // translation table and the entity's translation_key.
@@ -701,57 +784,44 @@ private Boolean routeEntity(String entityId, Map stateObj) {
 }
 
 /**
- * Entity category, from the registry once metadata has loaded.
- *
- * The suffix list below is only a fallback for the first seed of a fresh
- * install, before config/entity_registry/get_entries has answered -- without
- * it a diagnostic attribute would flash into existence and then disappear.
+ * Entity category, straight from Home Assistant's entity registry. Nothing is
+ * routed before the registry has answered (see seedResponse), so there is no
+ * guessing here.
  *
  * Only `diagnostic` is gated. HA's `config` entities are real user settings
  * (rapid_fridge, spin_speed, freezer_setpoint) and stay first-class.
  */
-@Field static final List<String> DIAGNOSTIC_SUFFIXES = [
-    "alarm_code", "cloud_connected", "connection_mode", "defrost_active",
-    "diagnosis", "diagnosis_status", "drum_last_cleaned",
-    "firmware_update_available", "job_beginning_status", "start_diagnosis",
-    "warming_center_state"
-]
-
 private String categoryFor(String entityId, String suffix) {
     Map meta = (state.entityMeta instanceof Map) ? (Map) state.entityMeta[entityId] : null
-    if (meta != null) return meta.cat            // registry has spoken, trust it
-    if (state.metaReady == true) return null     // known to have no category
-    return DIAGNOSTIC_SUFFIXES.contains(suffix) ? "diagnostic" : null
+    return (String) meta?.cat
 }
 
 /**
- * Names for codes Home Assistant has no translation for, worked out on real
- * panels. Keyed by translation table, so they apply to any appliance using
- * that board family rather than to one person's unit.
- *
- * Generated by tools/gen_labels.py from discovered-labels.json. Delete an
- * entry once upstream ships the same name.
+ * The form codes are compared in. Home Assistant stores translation keys
+ * lowercase, while appliances report them uppercase ("5B") and an older
+ * LocalThings display helper split them ("5 B").
  */
-@Field static final Map<String, Map<String, String>> FALLBACK_LABELS = [
-    "dishwasher_cycle": ["87": "Rinse Only"],
-    "dryer_cycle_table_03": ["2 F": "Heavy Duty", "2F": "Heavy Duty", "2f": "Heavy Duty",
-        "3 E": "Small Load", "30": "Activewear", "32": "Perm Press",
-        "33": "Steam Sanitize", "34": "Steam Refresh", "35": "Wrinkle Away",
-        "36": "Air Fluff", "3E": "Small Load", "3e": "Small Load"],
-    "pantry_zone_mode": ["TTYPE_MEAT_FISH": "Meat/Fish", "TTYPE_RF9000 A_FRIDGE": "Fridge",
-        "TTYPE_RF9000A_FRIDGE": "Fridge", "ttype_meat_fish": "Meat/Fish",
-        "ttype_rf9000a_fridge": "Fridge"],
-    "washer_cycle_table_02": ["5 A": "Steam Sanitize", "5 B": "Small Load", "51": "Super Speed",
-        "56": "Bedding", "5A": "Steam Sanitize", "5B": "Small Load",
-        "5a": "Steam Sanitize", "5b": "Small Load", "64": "Steam Whites",
-        "8 C": "AI OptiWash", "85": "Steam Normal", "8C": "AI OptiWash",
-        "8c": "AI OptiWash"]
-]
+private String normCode(def code) {
+    return code == null ? null : code.toString().replaceAll(/\s+/, "").toLowerCase()
+}
 
-private Map fallbackTable(String tk) { return (Map) FALLBACK_LABELS[tk] }
+// Duplicated from the library's NULL_STATES, for the same reason as the
+// naming helpers below.
+@Field static final List<String> LABEL_NULL_STATES = ["unknown", "unavailable", "none", "null", ""]
 
-private String fallbackLabel(String tk, String code) {
-    return (String) fallbackTable(tk)?.get(code)
+/**
+ * Say once per code, per install, that Home Assistant has no name for it and
+ * the raw code is shown. The list this builds in the logs is the list to send
+ * upstream to LocalThings -- names live there, not in this package.
+ */
+private void noteUnlabeled(String tk, String code) {
+    String key = "${tk}|${normCode(code)}"
+    Map seen = (state.unlabeledCodes instanceof Map) ? (Map) state.unlabeledCodes : [:]
+    if (seen[key]) return
+    seen[key] = true
+    state.unlabeledCodes = seen
+    log.warn "option ${tk} '${code}': Home Assistant has no name for it -- showing the raw " +
+             "code. Worth reporting to LocalThings."
 }
 
 // ---------------------------------------------------------------------------
@@ -924,5 +994,11 @@ void setSelectedAppliances(List selectedIds) {
     }
 
     sendEvent(name: "appliances", value: getChildDevices().size())
-    if (state.authed) seedStates()
+    if (state.authed) {
+        seedStates()
+    } else {
+        // Connecting ends in a full seed, so new devices fill in either way.
+        log.info "not connected to Home Assistant -- connecting so the appliance devices fill in"
+        initialize()
+    }
 }

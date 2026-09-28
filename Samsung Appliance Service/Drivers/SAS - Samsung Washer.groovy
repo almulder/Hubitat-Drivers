@@ -8,7 +8,10 @@
  *  so this driver deliberately does not claim capability "Switch" -- there is
  *  nothing to turn on.
  *
- *  Version: 0.5.0
+ *  Attribute names follow the HubiThings Replica Samsung Washer driver so
+ *  Rule Machine rules carry over; see attrRenames().
+ *
+ *  Version: 0.6.0
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -19,21 +22,24 @@ metadata {
         capability "EnergyMeter"
         capability "Refresh"
 
-        attribute "machineState",     "string"
+        // HubiThings Replica names (Samsung Washer)
+        attribute "switch",                 "string"
+        attribute "machineState",           "string"
+        attribute "washerJobState",         "string"
+        attribute "completionTime",         "string"
+        attribute "timeRemaining",          "string"
+        attribute "washerWaterTemperature", "string"
+        attribute "washerSpinLevel",        "string"
+        attribute "lockState",              "string"
+        attribute "remoteControlEnabled",   "string"
+
+        // No Replica equivalent
         attribute "running",          "string"
-        attribute "power",            "string"
-        attribute "progress",         "string"
         attribute "progressPercent",  "number"
-        attribute "completionTime",   "number"
-        attribute "estimatedFinish",  "string"
         attribute "cycle",            "string"
-        attribute "spinSpeed",        "string"
-        attribute "washTemperature",  "string"
         attribute "delayStart",       "number"
-        attribute "childLock",        "string"
         attribute "detergentLow",     "string"
         attribute "softenerLow",      "string"
-        attribute "smartControl",     "string"
         attribute "waterConsumption", "number"
         attribute "energySaved",      "number"
         attribute "drumCleanDueIn",   "number"
@@ -50,8 +56,8 @@ metadata {
         command "stop"
         command "pause"
         command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
-        command "setSpinSpeed", [[name: "Spin speed*", type: "STRING", description: "See the 'Spin Speed' state variable for this appliance's options"]]
-        command "setWashTemperature", [[name: "Temperature*", type: "STRING", description: "See the 'Wash Temperature' state variable for this appliance's options"]]
+        command "setWasherSpinLevel", [[name: "Spin speed*", type: "STRING", description: "See the 'Spin Speed' state variable for this appliance's options"]]
+        command "setWasherWaterTemperature", [[name: "Temperature*", type: "STRING", description: "See the 'Wash Temperature' state variable for this appliance's options"]]
         command "setDelayStart",      [[name: "Hours*", type: "NUMBER"]]
         command "setBuzzerSound", [[name: "Buzzer*", type: "STRING", description: "See the 'Buzzer Sound' state variable for this appliance's options"]]
         command "setDetergentQuantity", [[name: "Amount*", type: "STRING", description: "See the 'Detergent Quantity' state variable for this appliance's options"]]
@@ -72,6 +78,21 @@ metadata {
 }
 
 #include almulder.SAS-Samsung-Appliance-Common
+
+/** Library hook: this driver's names -> HubiThings Replica names. */
+Map attrRenames() {
+    return [
+        "power"          : "switch",
+        "machineState"   : [name: "machineState", values: RV_MACHINE_STATE],
+        "progress"       : [name: "washerJobState", values: RV_WASHER_JOB],
+        "estimatedFinish": [name: "completionTime", format: "isoZ"],
+        "completionTime" : [name: "timeRemaining", format: "hms"],
+        "washTemperature": "washerWaterTemperature",
+        "spinSpeed"      : "washerSpinLevel",
+        "childLock"      : [name: "lockState", values: RV_LOCK],
+        "smartControl"   : [name: "remoteControlEnabled", values: RV_BOOL]
+    ]
+}
 
 void installed() { log.info "${device.displayName} installed" }
 void updated() { log.info "${device.displayName} updated" }
@@ -106,8 +127,8 @@ void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
 
 void setCycle(String v)           { setSelectOption("cycle", v) }
-void setSpinSpeed(String v)       { setSelectOption("spin_speed", v) }
-void setWashTemperature(String v) { setSelectOption("wash_temperature", v) }
+void setWasherSpinLevel(String v)        { setSelectOption("spin_speed", v) }
+void setWasherWaterTemperature(String v) { setSelectOption("wash_temperature", v) }
 
 void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
 

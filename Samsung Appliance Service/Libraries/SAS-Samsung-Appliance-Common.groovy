@@ -5,11 +5,16 @@
  *  suffix mapping, per-attribute throttling with trailing flush, exact-value
  *  de-duplication, and Home Assistant service-call plumbing.
  *
- *  Version: 0.5.2
+ *  Version: 0.6.0
  *  Author:  Albert Mulder (almulder)
  *
  *  Install this library BEFORE the child drivers -- they will not compile
  *  without it.
+ *
+ *  HubiThings Replica names: see that section below. NO round brackets in
+ *  this header -- Hubitat finds the settings block by the first bracket
+ *  after the word library, and a bracket here makes every save fail with
+ *  a bare Internal error.
  */
 
 library(
@@ -33,7 +38,8 @@ import groovy.transform.Field
 // produced LimitExceededException in the InvisOutlet Listener.
 //
 // Keyed on attribute. state is already per-device, so this is effectively
-// per device + attribute.
+// per device + attribute. The policy lists below use the name BEFORE any
+// Replica rename (the camelCased HA suffix), so one list serves every driver.
 
 // Attributes that must never be delayed: anything an automation triggers on.
 // NOTE: `power` is deliberately absent. It is a binary on/off on the washer
@@ -45,7 +51,9 @@ import groovy.transform.Field
     "cooktopRunningState", "activeBurners", "filterStatus",
     "doorCoolerOpen", "doorFreezerOpen", "doorCvroomOpen",
     "burner1", "burner2", "burner3", "burner4", "burner5",
-    "cavity2Running", "cavity2CavityState", "cavity2MachineState",
+    "lowerOvenRunning", "lowerOvenCavityState", "lowerOvenMachineState",
+    "ovenCavityStatus", "doorState",
+    "brightnessLevel", "lamp", "vent", "hoodFanSpeed",
     "healthStatus"
 ]
 
@@ -64,6 +72,7 @@ import groovy.transform.Field
     "powerEnergy"        : 5000,
     "waterConsumption"   : 5000,
     "temperature"        : 5000,
+    "ovenTemperature"    : 5000,
     "coolerTemperature"  : 5000,
     "freezerTemperature" : 5000,
     "setpoint"           : 5000,
@@ -74,11 +83,12 @@ import groovy.transform.Field
     "filterUsage"        : 5000,
     "drumCleanDueIn"     : 5000,
     "lastUpdate"         : 300000,
-    "cavity2ProgressPercent" : 5000,
-    "cavity2Temperature"     : 5000,
-    "cavity2Setpoint"        : 5000,
-    "cavity2CookTime"        : 5000,
-    "cavity2OperationTime"   : 5000
+    "lowerOvenProgressPercent"  : 5000,
+    "lowerOvenEstimatedFinish"  : 5000,
+    "lowerOvenTemperature"      : 5000,
+    "lowerOvenSetpoint"         : 5000,
+    "lowerOvenCookTime"         : 5000,
+    "lowerOvenOperationTime"    : 5000
 ]
 
 @Field static final Integer DEFAULT_THROTTLE_MS = 2000
@@ -215,6 +225,69 @@ private Integer throttleMsFor(String attr) {
     return (ms != null) ? ms : DEFAULT_THROTTLE_MS
 }
 
+// ---------------------------------------------------------------------------
+// HubiThings Replica names
+// ---------------------------------------------------------------------------
+//
+// So Rule Machine rules written against the HubiThings Replica drivers keep
+// working, each driver's attrRenames() maps the name this library would emit
+// (the camelCased HA suffix, e.g. "childLock") to the Replica name
+// ("lockState"). An entry is either the new name as a String, or a Map:
+//
+//   [name: "lockState", values: RV_LOCK]      translate values too
+//   [name: "timeRemaining", format: "hms"]    minutes -> "HH:mm:ss"
+//   [name: "completionTime", format: "isoZ"]  "...+00:00" -> "...Z"
+//
+// Values only change where Replica's values are known to differ, and a value
+// missing from a table passes through untouched.
+
+// machineState on washer/dryer (SmartThings washer/dryerOperatingState).
+@Field static final Map<String, String> RV_MACHINE_STATE = ["idle": "stop", "active": "run", "pause": "pause"]
+// operatingState on ovens and the dishwasher (samsungce.*OperatingState).
+@Field static final Map<String, String> RV_OPERATING_STATE = ["idle": "ready", "active": "running", "pause": "paused"]
+@Field static final Map<String, String> RV_LOCK   = ["on": "locked", "off": "unlocked"]
+@Field static final Map<String, String> RV_BOOL   = ["on": "true", "off": "false"]
+@Field static final Map<String, String> RV_PROBE  = ["on": "connected", "off": "disconnected"]
+// LocalThings lowercases job states; SmartThings spells a few differently.
+@Field static final Map<String, String> RV_WASHER_JOB = ["idle": "none", "delaywash": "delayWash",
+    "weightsensing": "weightSensing", "airwashing": "airWash"]
+@Field static final Map<String, String> RV_DRYER_JOB = ["idle": "none", "delaywash": "delayWash",
+    "weightsensing": "weightSensing", "finish": "finished"]
+
+private String pad2(int n) { return (n < 10 ? "0" : "") + n }
+
+private Map replicaRule(String attr) {
+    Map renames
+    try {
+        renames = attrRenames()
+    } catch (Exception ignored) {
+        // A driver from before 0.6.0 has no attrRenames(): keep its own names
+        // rather than failing every event until it is updated.
+        return null
+    }
+    def r = renames?.get(attr)
+    if (r == null) return null
+    return (r instanceof Map) ? (Map) r : [name: r.toString()]
+}
+
+private Object replicaValue(Map rule, Object value) {
+    if (value == null) return null
+    if (rule.values instanceof Map) {
+        def v = ((Map) rule.values)[value.toString()]
+        if (v != null) return v
+    }
+    switch (rule.format) {
+        case "hms":
+            if (!(value instanceof Number) && !value.toString().isNumber()) return value
+            int mins = new BigDecimal(value.toString()).intValue()
+            return pad2(Math.floorDiv(mins, 60)) + ":" + pad2(mins % 60) + ":00"
+        case "isoZ":
+            String s = value.toString()
+            return s.endsWith("+00:00") ? s.substring(0, s.length() - 6) + "Z" : s
+    }
+    return value
+}
+
 /** Exact-value dedup. A separate concern from time throttling. */
 private Boolean isDuplicateUpdate(String attr, def value) {
     def cur = device.currentValue(attr)
@@ -229,8 +302,8 @@ private Boolean isDuplicateUpdate(String attr, def value) {
  * lands -- a plain drop would leave progressPercent frozen at 88 when a cycle
  * stops updating.
  */
-private Boolean isThrottled(String attr) {
-    Integer ms = throttleMsFor(attr)
+private Boolean isThrottled(String attr, String policy) {
+    Integer ms = throttleMsFor(policy)
     if (ms <= 0) return false
     Long nowMs = now()
     Map last = (state.lastSentAt instanceof Map) ? state.lastSentAt : [:]
@@ -248,13 +321,22 @@ private Boolean isThrottled(String attr) {
  */
 void emit(String attr, def value, Map opts = [:]) {
     if (attr == null) return
+    // Throttle policy follows the pre-rename name; the event carries the
+    // Replica name and value.
+    String policy = attr
+    Map rule = replicaRule(attr)
+    if (rule) {
+        attr = (String) rule.name
+        value = replicaValue(rule, value)
+        if (rule.format == "hms") opts = (opts ?: [:]).findAll { k, v -> k != "unit" }
+    }
     if (isDuplicateUpdate(attr, value)) return
 
-    if (isThrottled(attr)) {
+    if (isThrottled(attr, policy)) {
         Map pending = (state.pending instanceof Map) ? state.pending : [:]
         pending[attr] = [value: value, opts: opts]
         state.pending = pending
-        Integer secs = Math.max(1, (int) Math.ceil(throttleMsFor(attr) / 1000.0d))
+        Integer secs = Math.max(1, (int) Math.ceil(throttleMsFor(policy) / 1000.0d))
         runIn(secs, "flushPending", [overwrite: true])
         return
     }
@@ -431,13 +513,23 @@ void setSelectOption(String suffix, String option, String scope = "main") {
     // mapping because it is the thing that knows which name table applies.
     String code = parent?.selectCodeFor(entityId, option) ?: option
     List opts = optionsFor(suffix, scope)
-    if (opts && !opts.contains(code)) {
+    // The listener's name tables are keyed lowercase with no spaces, so match
+    // loosely and send Home Assistant the option exactly as it spells it.
+    def offered = opts?.find { sameCode(it, code) }
+    if (offered != null) code = offered.toString()
+    if (opts && offered == null) {
         log.warn "${device.displayName}: '${option}' is not offered for ${suffix}. " +
                  "Available: ${(optionLabelsFor(suffix, scope) ?: opts).join(', ')} " +
                  "(also listed as '${optionVarName(scope, suffix)}' in State Variables)"
         return
     }
     haSelect(suffix, code, scope)
+}
+
+/** "5B", "5b" and "5 B" are the same select code. */
+boolean sameCode(def a, def b) {
+    if (a == null || b == null) return false
+    return a.toString().replaceAll(/\s+/, "").equalsIgnoreCase(b.toString().replaceAll(/\s+/, ""))
 }
 
 /**
@@ -447,6 +539,24 @@ void setSelectOption(String suffix, String option, String scope = "main") {
 void setSwitchOption(String suffix, String value, String scope = "main") {
     if (onOff(value) == "on") haTurnOn(suffix, scope)
     else                      haTurnOff(suffix, scope)
+}
+
+/**
+ * A Replica-style time argument -- "hh:mm:ss", "hh:mm", or a plain number of
+ * SECONDS -- as the whole minutes a LocalThings cook_time takes, rounded up.
+ */
+Integer replicaTimeToMinutes(def t) {
+    String s = t?.toString()?.trim()
+    if (!s) return null
+    if (s.contains(":")) {
+        List<Integer> p = s.tokenize(":").collect { it.isInteger() ? it.toInteger() : 0 }
+        if (p.size() == 2) p << 0                  // hh:mm
+        if (p.size() != 3) { log.warn "${device.displayName}: can't read time '${t}'"; return null }
+        return (int) Math.ceil((p[0] * 3600 + p[1] * 60 + p[2]) / 60.0d)
+    }
+    if (s.isNumber()) return (int) Math.ceil(new BigDecimal(s).doubleValue() / 60.0d)
+    log.warn "${device.displayName}: can't read time '${t}' -- use hh:mm:ss or seconds"
+    return null
 }
 
 /** Set a `time` entity, e.g. a delayed-start clock. Value is "HH:MM:SS". */
