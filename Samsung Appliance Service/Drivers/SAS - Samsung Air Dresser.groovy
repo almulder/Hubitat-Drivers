@@ -12,7 +12,7 @@
  *  the right cycles and names on whatever board it meets. An entity upstream
  *  adds later still appears, named from its suffix, via emitGeneric.
  *
- *  Version: 0.5.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -38,7 +38,6 @@ metadata {
         attribute "healthStatus", "string"
         attribute "lastUpdate",   "string"
 
-        command "diagnosisStart"
         command "pause"
         command "start"
         command "setSanitize", [[name: "Sanitize*", type: "ENUM", constraints: ["Off", "On"]]]
@@ -92,7 +91,6 @@ private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : 
 
 // --- commands ---------------------------------------------------------------
 
-void diagnosisStart() { haPress("diagnosis_start") }
 void pause() { haPress("pause") }
 void start() { haPress("start") }
 void setSanitize(String v) { setSwitchOption("sanitize", v) }

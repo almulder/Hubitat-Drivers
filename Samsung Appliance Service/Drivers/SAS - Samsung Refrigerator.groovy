@@ -11,7 +11,7 @@
  *  Attribute names follow the HubiThings Replica Samsung Refrigerator driver
  *  where it has one; see attrRenames().
  *
- *  Version: 0.6.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -68,14 +68,16 @@ metadata {
         command "iceBitesOn"
         command "iceBitesOff"
         command "resetWaterFilter"
-        command "setFlexZoneMode", [[name: "Mode*", type: "STRING", description: "See the 'Flex Zone Mode' state variable for this appliance's options"]]
-        command "setPantryZoneMode", [[name: "Mode*", type: "STRING", description: "See the 'Pantry Zone Mode' state variable for this appliance's options"]]
+        // Home Assistant's names for this fridge's zones (TP2X_REF_20K, RF9000A
+        // flex zone and flex crisper). Hubitat builds a command dropdown only
+        // from a fixed list; the Listener turns the name back into the code.
+        command "setFlexZoneMode", [[name: "Mode*", type: "ENUM",
+            constraints: ["Freeze", "Soft freeze", "Meat/Fish", "Fruit & vegetables", "Beverage"]]]
+        command "setPantryZoneMode", [[name: "Mode*", type: "ENUM",
+            constraints: ["Fridge", "Meat/Fish"]]]
         command "setAutofillPitcher", [[name: "Autofill pitcher*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setDefrostDelay", [[name: "Defrost delay*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setSabbathMode", [[name: "Sabbath mode*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "startDiagnosis"
-        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
-                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
@@ -205,14 +207,10 @@ void resetWaterFilter() { haPress("reset_water_filter") }
 void setFlexZoneMode(String v)   { setSelectOption("flex_zone_mode", v) }
 void setPantryZoneMode(String v) { setSelectOption("pantry_zone_mode", v) }
 
-
 // --- settings -----------------------------------------------------------
 
 void setAutofillPitcher(String v) { setSwitchOption("autofill_pitcher", v) }
 void setDefrostDelay(String v) { setSwitchOption("defrost_delay", v) }
 void setSabbathMode(String v) { setSwitchOption("sabbath_mode", v) }
-
-/** Diagnostic: only visible as an attribute when diagnostics are enabled. */
-void startDiagnosis() { haPress("start_diagnosis") }
 
 void refresh() { haRefreshAll() }

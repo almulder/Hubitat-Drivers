@@ -5,7 +5,7 @@
  *  Service, discovers LocalThings appliances, creates one Hubitat child per
  *  appliance, and routes entity state to the right child.
  *
- *  Version: 0.4.6
+ *  Version: 0.4.8
  *  Author:  Albert Mulder (almulder)
  *
  *  Design notes
@@ -43,7 +43,7 @@
 import groovy.json.JsonOutput
 import groovy.transform.Field
 
-@Field static final String DRIVER_VERSION = "0.4.6"
+@Field static final String DRIVER_VERSION = "0.4.8"
 
 // Reconnect backoff ladder, seconds.
 @Field static final List<Integer> BACKOFF = [5, 10, 20, 40, 80, 160, 300]
@@ -327,6 +327,9 @@ void parse(String description) {
         case "auth_ok":
             log.info "authenticated to Home Assistant ${msg.ha_version}"
             state.authed = true
+            // Re-read categories and name tables on every connect, so the
+            // stored copy never outlives a change in Home Assistant or here.
+            state.metaReady = false
             sendEvent(name: "connection", value: "connected")
             // Registry first: nothing can be routed until we know the devices.
             sendTracked([type: "config/device_registry/list"], "device_registry")
@@ -596,7 +599,9 @@ private void storeEntityMeta(Map entries) {
         Map e = (Map) v
         Map rec = [:]
         if (e.translation_key) rec.tk = e.translation_key
-        if (e.entity_category) rec.cat = e.entity_category
+        // Only diagnostic is hidden. `config` entities are real settings
+        // (a fridge's zone modes, spin speed) and must reach the device.
+        if (e.entity_category == "diagnostic") rec.cat = "diagnostic"
         if (rec) meta[k.toString()] = rec
     }
     state.entityMeta = meta
@@ -793,7 +798,9 @@ private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
  */
 private String categoryFor(String entityId, String suffix) {
     Map meta = (state.entityMeta instanceof Map) ? (Map) state.entityMeta[entityId] : null
-    return (String) meta?.cat
+    // Checked here too, not only when storing: before 0.4.7 every category
+    // was stored, and a stored "config" would keep settings hidden.
+    return (meta?.cat == "diagnostic") ? "diagnostic" : null
 }
 
 /**

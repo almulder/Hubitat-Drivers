@@ -11,7 +11,7 @@
  *  Attribute names follow the HubiThings Replica Samsung Washer driver so
  *  Rule Machine rules carry over; see attrRenames().
  *
- *  Version: 0.6.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -55,18 +55,6 @@ metadata {
         command "start"
         command "stop"
         command "pause"
-        command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
-        command "setWasherSpinLevel", [[name: "Spin speed*", type: "STRING", description: "See the 'Spin Speed' state variable for this appliance's options"]]
-        command "setWasherWaterTemperature", [[name: "Temperature*", type: "STRING", description: "See the 'Wash Temperature' state variable for this appliance's options"]]
-        command "setDelayStart",      [[name: "Hours*", type: "NUMBER"]]
-        command "setBuzzerSound", [[name: "Buzzer*", type: "STRING", description: "See the 'Buzzer Sound' state variable for this appliance's options"]]
-        command "setDetergentQuantity", [[name: "Amount*", type: "STRING", description: "See the 'Detergent Quantity' state variable for this appliance's options"]]
-        command "setDetergentWaterHardness", [[name: "Hardness*", type: "STRING", description: "See the 'Detergent Water Hardness' state variable for this appliance's options"]]
-        command "setSoftenerQuantity", [[name: "Amount*", type: "STRING", description: "See the 'Softener Quantity' state variable for this appliance's options"]]
-        command "setSoftenerConcentration", [[name: "Concentration*", type: "STRING", description: "See the 'Softener Concentration' state variable for this appliance's options"]]
-        command "startDiagnosis"
-        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
-                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
@@ -126,22 +114,6 @@ void start() { haPress("start") }
 void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
 
-void setCycle(String v)           { setSelectOption("cycle", v) }
-void setWasherSpinLevel(String v)        { setSelectOption("spin_speed", v) }
-void setWasherWaterTemperature(String v) { setSelectOption("wash_temperature", v) }
-
-void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
-
-
 // --- settings -----------------------------------------------------------
-
-void setBuzzerSound(String v) { setSelectOption("buzzer_sound", v) }
-void setDetergentQuantity(String v) { setSelectOption("detergent_quantity", v) }
-void setDetergentWaterHardness(String v) { setSelectOption("detergent_water_hardness", v) }
-void setSoftenerQuantity(String v) { setSelectOption("softener_quantity", v) }
-void setSoftenerConcentration(String v) { setSelectOption("softener_concentration", v) }
-
-/** Diagnostic: only visible as an attribute when diagnostics are enabled. */
-void startDiagnosis() { haPress("start_diagnosis") }
 
 void refresh() { haRefreshAll() }
