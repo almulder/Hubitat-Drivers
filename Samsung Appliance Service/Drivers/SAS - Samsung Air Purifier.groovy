@@ -99,6 +99,9 @@ metadata {
 
 #include almulder.SAS-Samsung-Appliance-Common
 
+/** Library hook: no HubiThings Replica driver to match for this type. */
+Map attrRenames() { return [:] }
+
 void installed() { log.info "${device.displayName} installed" }
 
 void updated() { log.info "${device.displayName} updated" }

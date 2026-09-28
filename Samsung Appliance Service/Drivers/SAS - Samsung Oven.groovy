@@ -1,18 +1,33 @@
 /**
  *  SAS - Samsung Oven
  *
- *  Child of SAS - Samsung Appliance Listener.
+ *  Child of SAS - Samsung Appliance Listener. For an oven on its own (a wall
+ *  oven); a range -- oven plus cooktop -- uses SAS - Samsung Range.
  *
- *  UNTESTED: generated from upstream's registry source
- *  (`registry/by_type/oven.py`) because none of this hardware was on hand.
- *  Entity inventory at generation time: 3 binary_sensor, 1 button, 2 number, 1 select, 7 sensor, 6 switch.
+ *  UNTESTED: no standalone oven on hand. Built from upstream's registry
+ *  (`registry/by_type/oven.py`), which binds the same oven resources as the
+ *  range -- so the entity names below are the ones verified on the range.
  *
- *  Nothing here is specific to one appliance model. Option names and option
- *  lists are resolved per install by the listener, so this driver should show
- *  the right cycles and names on whatever board it meets. An entity upstream
- *  adds later still appears, named from its suffix, via emitGeneric.
+ *  ONE device for the whole oven, doing the job of the two HubiThings
+ *  Replica drivers (Samsung Oven + Samsung Oven Cavity), for ovens with a
+ *  removable divider:
  *
- *  Version: 0.5.0
+ *    divider OUT   ovenCavityStatus = off. The main attributes are the whole
+ *                  oven; cavity commands are refused, as Replica's were.
+ *    divider IN    ovenCavityStatus = on. The main attributes are the UPPER
+ *                  oven and the cavity* attributes are the LOWER oven.
+ *
+ *  An oven without a divider simply never reports a second cavity.
+ *
+ *  Where the divider comes from: the lower cavity's /connected resource,
+ *  which LocalThings exposes as a diagnostic binary sensor it calls "Cloud
+ *  connected". "Cavity state" is NOT it: that stays Ready either way.
+ *
+ *  Attribute and command names follow the Replica drivers so Rule Machine
+ *  rules carry over. Lower-oven names start with "lowerOven" so they are
+ *  easy to find, since both ovens now share one device.
+ *
+ *  Version: 0.6.0
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -20,29 +35,70 @@ metadata {
     definition(name: "SAS - Samsung Oven", namespace: "almulder", author: "Albert Mulder") {
         capability "Actuator"
         capability "Sensor"
-        capability "Refresh"
+        capability "Switch"
         capability "ContactSensor"
+        capability "TemperatureMeasurement"
+        capability "Refresh"
 
-        attribute "cloudConnected",       "string"   // diagnostic
-        attribute "cycleActive",          "string"
-        attribute "cookTime",             "number"
+        // Upper oven, or the whole oven with the divider out (Replica: Oven)
+        attribute "operatingState",       "string"
+        attribute "ovenTemperature",      "number"
         attribute "ovenSetpoint",         "number"
         attribute "ovenMode",             "string"
-        attribute "currentTempC",         "number"
-        attribute "diagnosisStatus",      "string"   // diagnostic
-        attribute "finishTime",           "number"
-        attribute "machineState",         "string"
-        attribute "operationTimeMinutes", "number"
-        attribute "ovenState",            "string"
-        attribute "progressPercentage",   "number"
-        attribute "cooktopOnAlert",       "string"
-        attribute "energySaving",         "string"
-        attribute "fastPreheat",          "string"
-        attribute "lamp",                 "string"
-        attribute "naturalSteam",         "string"
-        attribute "sound",                "string"
+        attribute "progress",             "number"
+        attribute "completionTime",       "string"
+        attribute "operationTime",        "number"
+        attribute "lockState",            "string"
+        attribute "remoteControlEnabled", "string"
+        attribute "doorState",            "string"
+        attribute "probeStatus",          "string"
+        attribute "probeTemperature",     "number"
+        attribute "probeSetpoint",        "number"
+
+        // Lower oven (Replica: Oven Cavity)
+        attribute "ovenCavityStatus",      "string"
+        attribute "lowerOvenOperatingState",  "string"
+        attribute "lowerOvenTemperature", "number"
+        attribute "lowerOvenSetpoint",    "number"
+        attribute "lowerOvenMode",        "string"
+        attribute "lowerOvenProgress",        "number"
+        attribute "lowerOvenCompletionTime",  "string"
+        attribute "lowerOvenOperationTime",   "number"
+        attribute "lowerOvenCookTime",        "number"
+        attribute "lowerOvenRunning",         "string"
+        attribute "lowerOvenState",       "string"
+
+        // No Replica equivalent
+        attribute "running",         "string"
+        attribute "cavityState",     "string"
+        attribute "cookTime",        "number"
+        attribute "cooktopOnAlert",  "string"
+        attribute "energySaving",    "string"
+        attribute "fastPreheat",     "string"
+        attribute "lamp",            "string"
+        attribute "naturalSteam",    "string"
+        attribute "sound",           "string"
+        attribute "diagnosisStatus", "string"   // diagnostic
+
         attribute "healthStatus", "string"
         attribute "lastUpdate",   "string"
+
+        command "start", [[name: "Mode", type: "STRING", description: "See the 'Cooking Mode' state variable"],
+                          [name: "Time (hh:mm:ss OR secs)", type: "STRING"],
+                          [name: "Setpoint", type: "NUMBER"]]
+        command "stop"
+        command "setOvenSetpoint",  [[name: "Temperature*", type: "NUMBER"]]
+        command "setOvenMode",      [[name: "Mode*", type: "STRING", description: "See the 'Cooking Mode' state variable for this appliance's options"]]
+        command "setOperationTime", [[name: "Time* (hh:mm:ss OR secs)", type: "STRING"]]
+        command "setCookTime",      [[name: "Minutes*", type: "NUMBER"]]
+
+        command "startLowerOven", [[name: "Mode", type: "STRING", description: "See the 'Cooking Mode (subdevice1)' state variable"],
+                                [name: "Time (hh:mm:ss OR secs)", type: "STRING"],
+                                [name: "Setpoint", type: "NUMBER"]]
+        command "stopLowerOven"
+        command "setLowerOvenSetpoint",  [[name: "Temperature*", type: "NUMBER"]]
+        command "setLowerOvenMode",      [[name: "Mode*", type: "STRING", description: "See the 'Cooking Mode (subdevice1)' state variable for this appliance's options"]]
+        command "setLowerOvenOperationTime", [[name: "Time* (hh:mm:ss OR secs)", type: "STRING"]]
 
         command "diagnosisStart"
         command "setCooktopOnAlert", [[name: "Cooktop on alert*", type: "ENUM", constraints: ["Off", "On"]]]
@@ -51,9 +107,6 @@ metadata {
         command "setLamp", [[name: "Lamp*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setNaturalSteam", [[name: "Natural steam*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setSound", [[name: "Sound*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setOvenMode", [[name: "Oven mode*", type: "STRING", description: "See the 'Oven Mode' state variable for this appliance's options"]]
-        command "setCookTime", [[name: "Cook time*", type: "NUMBER"]]
-        command "setOvenSetpoint", [[name: "Oven setpoint*", type: "NUMBER"]]
         command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
                                     [name: "Option*", type: "STRING"]]
     }
@@ -68,8 +121,30 @@ metadata {
 
 #include almulder.SAS-Samsung-Appliance-Common
 
-void installed() { log.info "${device.displayName} installed" }
+/** Library hook: this driver's names -> HubiThings Replica names. */
+Map attrRenames() {
+    return [
+        "machineState"          : [name: "operatingState", values: RV_OPERATING_STATE],
+        "setpoint"              : "ovenSetpoint",
+        "cookingMode"           : "ovenMode",
+        "progressPercent"       : "progress",
+        "estimatedFinish"       : [name: "completionTime", format: "isoZ"],
+        "childLock"             : [name: "lockState", values: RV_LOCK],
+        "smartControl"          : [name: "remoteControlEnabled", values: RV_BOOL],
+        "probeConnected"        : [name: "probeStatus", values: RV_PROBE],
+        "probeTargetTemperature": "probeSetpoint",
+        "foodProbe"             : "probeTemperature",
+        "foodProbeTarget"       : "probeSetpoint",
 
+        "lowerOvenMachineState"    : [name: "lowerOvenOperatingState", values: RV_OPERATING_STATE],
+        "lowerOvenCookingMode"     : "lowerOvenMode",
+        "lowerOvenProgressPercent" : "lowerOvenProgress",
+        "lowerOvenEstimatedFinish" : [name: "lowerOvenCompletionTime", format: "isoZ"],
+        "lowerOvenCavityState"     : "lowerOvenState"
+    ]
+}
+
+void installed() { log.info "${device.displayName} installed" }
 void updated() { log.info "${device.displayName} updated" }
 
 void parseEntity(Map e) {
@@ -78,26 +153,121 @@ void parseEntity(Map e) {
     if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}, scope=${e.scope}) = ${e.state}"
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
-        emitSelect(e, e.scope == "main" ? "" : cap(e.scope as String))
+        emitSelect(e, e.scope == "main" ? "" : "lowerOven")
         return
     }
+
+    // Second oven cavity -> lowerOven* attributes.
     if (e.scope != "main") {
-        emitGeneric(e, e.scope as String)
+        cavityScope((String) e.scope)
+        // The divider flag: LocalThings' "Divider" sensor (almulder fork), or
+        // on stock LocalThings the same reading as the diagnostic "Cloud
+        // connected", which emitGeneric would otherwise hide.
+        if (e.suffix == "divider" || e.suffix == "cloud_connected") {
+            emitOnOff("ovenCavityStatus", e.state)
+            return
+        }
+        emitGeneric(e, "lowerOven")
         return
     }
 
     switch (e.suffix) {
-        case "door_open":
+        case "power":
+            emitOnOff("switch", e.state)
+            return
+        case "door":
             emitOpenClosed("contact", e.state)
+            emitOpenClosed("doorState", e.state)
+            return
+        case "temperature":
+            if (isNullState(e.state)) return
+            Map unit = [unit: "°${location.temperatureScale}"]
+            emit("temperature", coerce(e.state), unit)       // TemperatureMeasurement
+            emit("ovenTemperature", coerce(e.state), unit)   // Replica
             return
         default:
             emitGeneric(e)
     }
 }
 
-private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : s }
+/**
+ * The listener names a subdevice's scope after it ("subdevice1" on the range).
+ * Remembered rather than assumed, so commands reach whatever this oven's
+ * second cavity is called.
+ */
+private void cavityScope(String scope) {
+    if (state.cavityScope != scope) state.cavityScope = scope
+}
 
-// --- commands ---------------------------------------------------------------
+private String sub() { return (state.cavityScope ?: "subdevice1") as String }
+
+// --- upper / whole oven -----------------------------------------------------
+
+void on()  { haTurnOn("power") }
+void off() { haTurnOff("power") }
+
+/** Replica's start(mode, time, setpoint); every argument is optional. */
+void start(String mode = null, String time = null, BigDecimal setpoint = null) {
+    startCook("main", mode, time, setpoint)
+}
+
+void stop() { haPress("stop") }
+
+void setOvenSetpoint(BigDecimal t) { haSetNumber("setpoint", t) }
+void setOvenMode(String v)         { setSelectOption("cooking_mode", v) }
+void setOperationTime(String t)    { setCookMinutes("main", t) }
+void setCookTime(BigDecimal m)     { haSetNumber("cook_time", m) }
+
+// --- lower oven --------------------------------------------------------------
+
+void startLowerOven(String mode = null, String time = null, BigDecimal setpoint = null) {
+    if (!cavityInstalled("startLowerOven")) return
+    startCook(sub(), mode, time, setpoint)
+}
+
+void stopLowerOven() {
+    if (!cavityInstalled("stopLowerOven")) return
+    haPress("stop", sub())
+}
+
+void setLowerOvenSetpoint(BigDecimal t) {
+    if (!cavityInstalled("setLowerOvenSetpoint")) return
+    haSetNumber("setpoint", t, sub())
+}
+
+void setLowerOvenMode(String v) {
+    if (!cavityInstalled("setLowerOvenMode")) return
+    setSelectOption("cooking_mode", v, sub())
+}
+
+void setLowerOvenOperationTime(String t) {
+    if (!cavityInstalled("setLowerOvenOperationTime")) return
+    setCookMinutes(sub(), t)
+}
+
+/** Replica refused cavity commands unless ovenCavityStatus was "on". */
+private boolean cavityInstalled(String what) {
+    if (device.currentValue("ovenCavityStatus") == "off") {
+        log.warn "${device.displayName}: ${what} ignored -- the divider is out " +
+                 "(ovenCavityStatus: off), so there is no lower oven"
+        return false
+    }
+    return true
+}
+
+private void startCook(String scope, String mode, String time, BigDecimal setpoint) {
+    if (mode) setSelectOption("cooking_mode", mode, scope)
+    if (time) setCookMinutes(scope, time)
+    if (setpoint != null) haSetNumber("setpoint", setpoint, scope)
+    haPress("start_cooking", scope)
+}
+
+private void setCookMinutes(String scope, String time) {
+    Integer mins = replicaTimeToMinutes(time)
+    if (mins != null) haSetNumber("cook_time", mins, scope)
+}
+
+// --- settings -----------------------------------------------------------
 
 void diagnosisStart() { haPress("diagnosis_start") }
 void setCooktopOnAlert(String v) { setSwitchOption("cooktop_on_alert", v) }
@@ -106,8 +276,5 @@ void setFastPreheat(String v) { setSwitchOption("fast_preheat", v) }
 void setLamp(String v) { setSwitchOption("lamp", v) }
 void setNaturalSteam(String v) { setSwitchOption("natural_steam", v) }
 void setSound(String v) { setSwitchOption("sound", v) }
-void setOvenMode(String v) { setSelectOption("oven_mode", v) }
-void setCookTime(BigDecimal v) { haSetNumber("cook_time", v) }
-void setOvenSetpoint(BigDecimal v) { haSetNumber("oven_setpoint", v) }
 
 void refresh() { haRefreshAll() }

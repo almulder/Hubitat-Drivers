@@ -4,7 +4,10 @@
  *  Child of Samsung Appliance Listener. One Hubitat device for the whole
  *  appliance. Verified against DA_DW_A51_20_COMMON (25 entities).
  *
- *  Version: 0.5.0
+ *  Attribute names follow the HubiThings Replica Samsung Dishwasher driver
+ *  so Rule Machine rules carry over; see attrRenames().
+ *
+ *  Version: 0.6.0
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -16,19 +19,22 @@ metadata {
         capability "EnergyMeter"
         capability "Refresh"
 
-        attribute "machineState",     "string"
+        // HubiThings Replica names (Samsung Dishwasher)
+        attribute "operatingState",       "string"
+        attribute "jobState",             "string"
+        attribute "washingCourse",        "string"
+        attribute "completionTime",       "string"
+        attribute "remainingTime",        "number"
+        attribute "lockState",            "string"
+        attribute "remoteControlEnabled", "string"
+
+        // No Replica equivalent
         attribute "running",          "string"
-        attribute "progress",         "string"
         attribute "progressPercent",  "number"
-        attribute "completionTime",   "number"
-        attribute "estimatedFinish",  "string"
-        attribute "cycle",            "string"
         attribute "delayStart",       "number"
-        attribute "childLock",        "string"
         attribute "sanitize",         "string"
         attribute "stormWash",        "string"
         attribute "autoReleaseDry",   "string"
-        attribute "smartControl",     "string"
         attribute "filterStatus",     "string"
         attribute "filterUsage",      "string"
         attribute "drumCleanDueIn",   "number"
@@ -38,8 +44,9 @@ metadata {
 
         command "start"
         command "stop"
+        command "cancel"
         command "pause"
-        command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
+        command "setWashingCourse", [[name: "Course*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
         command "setDelayStart", [[name: "Hours*", type: "NUMBER"]]
         command "sanitizeOn"
         command "sanitizeOff"
@@ -60,6 +67,19 @@ metadata {
 }
 
 #include almulder.SAS-Samsung-Appliance-Common
+
+/** Library hook: this driver's names -> HubiThings Replica names. */
+Map attrRenames() {
+    return [
+        "machineState"   : [name: "operatingState", values: RV_OPERATING_STATE],
+        "progress"       : "jobState",
+        "cycle"          : "washingCourse",
+        "estimatedFinish": [name: "completionTime", format: "isoZ"],
+        "completionTime" : "remainingTime",
+        "childLock"      : [name: "lockState", values: RV_LOCK],
+        "smartControl"   : [name: "remoteControlEnabled", values: RV_BOOL]
+    ]
+}
 
 void installed() { log.info "${device.displayName} installed" }
 void updated() { log.info "${device.displayName} updated" }
@@ -101,7 +121,10 @@ void start() { haPress("start") }
 void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
 
-void setCycle(String cycle) { setSelectOption("cycle", cycle) }
+/** Replica's name for stop. */
+void cancel() { stop() }
+
+void setWashingCourse(String course) { setSelectOption("cycle", course) }
 
 void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
 

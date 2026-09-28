@@ -8,7 +8,10 @@
  *  open when ANY compartment is open -- so it can drive a normal
  *  contact-sensor automation, while the individual doors stay available.
  *
- *  Version: 0.5.0
+ *  Attribute names follow the HubiThings Replica Samsung Refrigerator driver
+ *  where it has one; see attrRenames().
+ *
+ *  Version: 0.6.0
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -22,6 +25,15 @@ metadata {
         capability "EnergyMeter"
         capability "Refresh"
 
+        // HubiThings Replica names (Samsung Refrigerator). temperature and
+        // coolingSetpoint follow the compartment chosen under Preferences.
+        attribute "coolingSetpoint",     "number"
+        attribute "rapidCooling",        "string"
+        attribute "rapidFreezing",       "string"
+        attribute "waterFilterStatus",   "string"
+        attribute "waterFilterUsage",    "number"
+
+        // No Replica equivalent (Replica split these across Cavity devices)
         attribute "coolerTemperature",   "number"
         attribute "freezerTemperature",  "number"
         attribute "coolerSetpoint",      "number"
@@ -29,8 +41,6 @@ metadata {
         attribute "doorCoolerOpen",      "string"
         attribute "doorFreezerOpen",     "string"
         attribute "doorCvroomOpen",      "string"
-        attribute "rapidFridge",         "string"
-        attribute "rapidFreezing",       "string"
         attribute "cubedIceEnabled",     "string"
         attribute "iceBitesEnabled",     "string"
         attribute "cubedIceMakingStatus","string"
@@ -38,8 +48,6 @@ metadata {
         attribute "autofillPitcher",     "string"
         attribute "sabbathMode",         "string"
         attribute "defrostDelay",        "string"
-        attribute "filterStatus",        "string"
-        attribute "filterUsage",         "number"
         attribute "flexZoneMode",        "string"
         attribute "pantryZoneMode",      "string"
         attribute "energyThisMonth",     "number"
@@ -52,10 +60,9 @@ metadata {
 
         command "setCoolerSetpoint",  [[name: "Temperature*", type: "NUMBER"]]
         command "setFreezerSetpoint", [[name: "Temperature*", type: "NUMBER"]]
-        command "rapidFridgeOn"
-        command "rapidFridgeOff"
-        command "rapidFreezeOn"
-        command "rapidFreezeOff"
+        command "setCoolingSetpoint", [[name: "Temperature*", type: "NUMBER", description: "Sets the compartment chosen under Preferences"]]
+        command "setRapidCooling",  [[name: "Rapid Cooling*",  type: "ENUM", constraints: ["on", "off"]]]
+        command "setRapidFreezing", [[name: "Rapid Freezing*", type: "ENUM", constraints: ["on", "off"]]]
         command "cubedIceOn"
         command "cubedIceOff"
         command "iceBitesOn"
@@ -73,7 +80,7 @@ metadata {
 
     preferences {
         input name: "primaryTemp", type: "enum", defaultValue: "cooler",
-              title: "Which reading drives the standard 'temperature' attribute",
+              title: "Which compartment drives 'temperature' and 'coolingSetpoint'",
               options: ["cooler": "Fridge compartment", "freezer": "Freezer compartment"]
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
@@ -83,6 +90,15 @@ metadata {
 }
 
 #include almulder.SAS-Samsung-Appliance-Common
+
+/** Library hook: this driver's names -> HubiThings Replica names. */
+Map attrRenames() {
+    return [
+        "rapidFridge" : "rapidCooling",
+        "filterStatus": "waterFilterStatus",
+        "filterUsage" : "waterFilterUsage"
+    ]
+}
 
 void installed() { log.info "${device.displayName} installed" }
 void updated() { log.info "${device.displayName} updated" }
@@ -119,10 +135,19 @@ void parseEntity(Map e) {
             String attr = snakeToCamel((String) e.suffix)
             def v = coerce(e.state)
             emit(attr, v, [unit: "°${location.temperatureScale}"])
-            String want = (settings?.primaryTemp ?: "cooler") + "_temperature"
+            String want = primaryCompartment() + "_temperature"
             if (e.suffix == want) emit("temperature", v, [unit: "°${location.temperatureScale}"])
             return
 
+        case "cooler_setpoint":
+        case "freezer_setpoint":
+            if (isNullState(e.state)) return
+            def sp = coerce(e.state)
+            emit(snakeToCamel((String) e.suffix), sp, [unit: "°${location.temperatureScale}"])
+            if (e.suffix == primaryCompartment() + "_setpoint") {
+                emit("coolingSetpoint", sp, [unit: "°${location.temperatureScale}"])
+            }
+            return
         case "power":
             if (!isNullState(e.state)) emit("power", coerce(e.state), [unit: e.unit ?: "W"])
             return
@@ -163,10 +188,13 @@ private void updateAggregateDoor(String attr, String value) {
 void setCoolerSetpoint(BigDecimal t)  { haSetNumber("cooler_setpoint", t) }
 void setFreezerSetpoint(BigDecimal t) { haSetNumber("freezer_setpoint", t) }
 
-void rapidFridgeOn()  { haTurnOn("rapid_fridge") }
-void rapidFridgeOff() { haTurnOff("rapid_fridge") }
-void rapidFreezeOn()  { haTurnOn("rapid_freezing") }
-void rapidFreezeOff() { haTurnOff("rapid_freezing") }
+/** Replica: the main device's setpoint is the primary compartment's. */
+void setCoolingSetpoint(BigDecimal t) { haSetNumber(primaryCompartment() + "_setpoint", t) }
+
+void setRapidCooling(String v)  { setSwitchOption("rapid_fridge", v) }
+void setRapidFreezing(String v) { setSwitchOption("rapid_freezing", v) }
+
+private String primaryCompartment() { return settings?.primaryTemp ?: "cooler" }
 void cubedIceOn()     { haTurnOn("cubed_ice_enabled") }
 void cubedIceOff()    { haTurnOff("cubed_ice_enabled") }
 void iceBitesOn()     { haTurnOn("ice_bites_enabled") }
