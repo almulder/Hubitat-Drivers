@@ -7,7 +7,7 @@
  *  Attribute names follow the HubiThings Replica Samsung Dishwasher driver
  *  so Rule Machine rules carry over; see attrRenames().
  *
- *  Version: 0.6.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -53,7 +53,6 @@ metadata {
         command "stormWashOn"
         command "stormWashOff"
         command "setAutoReleaseDry", [[name: "Auto release dry*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "startDiagnosis"
         command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
                                     [name: "Option*", type: "STRING"]]
     }
@@ -136,8 +135,5 @@ void stormWashOff() { haTurnOff("storm_wash") }
 // --- settings -----------------------------------------------------------
 
 void setAutoReleaseDry(String v) { setSwitchOption("auto_release_dry", v) }
-
-/** Diagnostic: only visible as an attribute when diagnostics are enabled. */
-void startDiagnosis() { haPress("start_diagnosis") }
 
 void refresh() { haRefreshAll() }

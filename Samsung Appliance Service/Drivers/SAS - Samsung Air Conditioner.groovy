@@ -16,7 +16,7 @@
  *  Their state is reported as a plain attribute, but setting them needs
  *  climate/water_heater service helpers the library does not have yet.
  *
- *  Version: 0.5.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -105,7 +105,6 @@ metadata {
         attribute "lastUpdate",   "string"
 
         command "autoCleanStop"
-        command "diagnosisStart"
         command "filterTimeReset"
         command "setAbsenceClean", [[name: "Absence clean*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setAbsencePowerSavingActive", [[name: "Absence power saving active*", type: "ENUM", constraints: ["Off", "On"]]]
@@ -193,7 +192,6 @@ private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : 
 // --- commands ---------------------------------------------------------------
 
 void autoCleanStop() { haPress("auto_clean_stop") }
-void diagnosisStart() { haPress("diagnosis_start") }
 void filterTimeReset() { haPress("filter_time_reset") }
 void setAbsenceClean(String v) { setSwitchOption("absence_clean", v) }
 void setAbsencePowerSavingActive(String v) { setSwitchOption("absence_power_saving_active", v) }

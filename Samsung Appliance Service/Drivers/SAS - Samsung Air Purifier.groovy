@@ -12,7 +12,7 @@
  *  the right cycles and names on whatever board it meets. An entity upstream
  *  adds later still appears, named from its suffix, via emitGeneric.
  *
- *  Version: 0.5.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -62,7 +62,6 @@ metadata {
         attribute "healthStatus", "string"
         attribute "lastUpdate",   "string"
 
-        command "diagnosisStart"
         command "setBoosterLight", [[name: "Booster light*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setBoosterLightManualBrightness", [[name: "Booster light manual brightness*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setBoosterOscillation", [[name: "Booster oscillation*", type: "ENUM", constraints: ["Off", "On"]]]
@@ -131,7 +130,6 @@ private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : 
 
 // --- commands ---------------------------------------------------------------
 
-void diagnosisStart() { haPress("diagnosis_start") }
 void setBoosterLight(String v) { setSwitchOption("booster_light", v) }
 void setBoosterLightManualBrightness(String v) { setSwitchOption("booster_light_manual_brightness", v) }
 void setBoosterOscillation(String v) { setSwitchOption("booster_oscillation", v) }

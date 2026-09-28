@@ -8,7 +8,7 @@
  *  Attribute names follow the HubiThings Replica Samsung Dryer driver so
  *  Rule Machine rules carry over; see attrRenames().
  *
- *  Version: 0.6.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -44,13 +44,6 @@ metadata {
         command "start"
         command "stop"
         command "pause"
-        command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
-        command "setDryerDryLevel", [[name: "Dry level*", type: "STRING", description: "See the 'Dry Level' state variable for this appliance's options"]]
-        command "setDelayStart", [[name: "Hours*",     type: "NUMBER"]]
-        command "setDryerWrinklePrevent", [[name: "Wrinkle prevent*", type: "ENUM", constraints: ["off", "on"]]]
-        command "setBuzzerSound", [[name: "Buzzer*", type: "STRING", description: "See the 'Buzzer Sound' state variable for this appliance's options"]]
-        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
-                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
@@ -104,16 +97,6 @@ void start() { haPress("start") }
 void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
 
-void setCycle(String v)    { setSelectOption("cycle", v) }
-void setDryerDryLevel(String v) { setSelectOption("dry_level", v) }
-
-void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
-
-void setDryerWrinklePrevent(String v) { setSwitchOption("wrinkle_prevent", v) }
-
-
 // --- settings -----------------------------------------------------------
-
-void setBuzzerSound(String v) { setSelectOption("buzzer_sound", v) }
 
 void refresh() { haRefreshAll() }

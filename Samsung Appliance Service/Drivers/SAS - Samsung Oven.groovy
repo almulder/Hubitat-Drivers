@@ -27,7 +27,7 @@
  *  rules carry over. Lower-oven names start with "lowerOven" so they are
  *  easy to find, since both ovens now share one device.
  *
- *  Version: 0.6.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -90,7 +90,6 @@ metadata {
         command "setOvenSetpoint",  [[name: "Temperature*", type: "NUMBER"]]
         command "setOvenMode",      [[name: "Mode*", type: "STRING", description: "See the 'Cooking Mode' state variable for this appliance's options"]]
         command "setOperationTime", [[name: "Time* (hh:mm:ss OR secs)", type: "STRING"]]
-        command "setCookTime",      [[name: "Minutes*", type: "NUMBER"]]
 
         command "startLowerOven", [[name: "Mode", type: "STRING", description: "See the 'Cooking Mode (subdevice1)' state variable"],
                                 [name: "Time (hh:mm:ss OR secs)", type: "STRING"],
@@ -100,15 +99,8 @@ metadata {
         command "setLowerOvenMode",      [[name: "Mode*", type: "STRING", description: "See the 'Cooking Mode (subdevice1)' state variable for this appliance's options"]]
         command "setLowerOvenOperationTime", [[name: "Time* (hh:mm:ss OR secs)", type: "STRING"]]
 
-        command "diagnosisStart"
-        command "setCooktopOnAlert", [[name: "Cooktop on alert*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setEnergySaving", [[name: "Energy saving*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setFastPreheat", [[name: "Fast preheat*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setLamp", [[name: "Lamp*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setNaturalSteam", [[name: "Natural steam*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setSound", [[name: "Sound*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
-                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
@@ -216,7 +208,6 @@ void stop() { haPress("stop") }
 void setOvenSetpoint(BigDecimal t) { haSetNumber("setpoint", t) }
 void setOvenMode(String v)         { setSelectOption("cooking_mode", v) }
 void setOperationTime(String t)    { setCookMinutes("main", t) }
-void setCookTime(BigDecimal m)     { haSetNumber("cook_time", m) }
 
 // --- lower oven --------------------------------------------------------------
 
@@ -269,12 +260,7 @@ private void setCookMinutes(String scope, String time) {
 
 // --- settings -----------------------------------------------------------
 
-void diagnosisStart() { haPress("diagnosis_start") }
-void setCooktopOnAlert(String v) { setSwitchOption("cooktop_on_alert", v) }
-void setEnergySaving(String v) { setSwitchOption("energy_saving", v) }
 void setFastPreheat(String v) { setSwitchOption("fast_preheat", v) }
 void setLamp(String v) { setSwitchOption("lamp", v) }
-void setNaturalSteam(String v) { setSwitchOption("natural_steam", v) }
-void setSound(String v) { setSwitchOption("sound", v) }
 
 void refresh() { haRefreshAll() }

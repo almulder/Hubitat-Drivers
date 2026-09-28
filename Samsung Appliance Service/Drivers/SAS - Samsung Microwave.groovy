@@ -19,7 +19,7 @@
  *  suffix is empty. HA reports its speed as a percentage in steps of
  *  100 / speed count; this driver turns that back into Samsung's 0-4.
  *
- *  Version: 0.6.0
+ *  Version: 0.6.1
  *  Author:  Albert Mulder (almulder)
  */
 
@@ -63,17 +63,6 @@ metadata {
         command "setHoodFanSpeed",    [[name: "speed*", type: "NUMBER", description: "0 (off) to settableMaxFanSpeed"]]
 
         command "stop"
-        command "setCookTime",    [[name: "Minutes*", type: "NUMBER"]]
-        command "setCookingMode", [[name: "Mode*", type: "STRING", description: "See the 'Cooking Mode' state variable for this appliance's options"]]
-        command "ventOn"
-        command "ventOff"
-        command "lampOn"
-        command "lampOff"
-        command "setSound", [[name: "Sound*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setEndSignalReminder", [[name: "End signal reminder*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setFilterReminder", [[name: "Filter reminder*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
-                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
@@ -193,9 +182,6 @@ void setBrightnessLevel(String level) {
 void on()  { setBrightnessLevel((state.lastBrightnessLevel ?: "high") as String) }
 void off() { setBrightnessLevel("off") }
 
-void lampOn()  { on() }
-void lampOff() { off() }
-
 // --- vent ----------------------------------------------------------------
 
 void setHoodFanSpeed(BigDecimal speed) {
@@ -208,22 +194,12 @@ void setHoodFanSpeed(BigDecimal speed) {
     haService("fan", "set_percentage", "", [percentage: s * step])
 }
 
-/** The vent is a fan entity with no suffix; address it by its empty-string key. */
-void ventOn()  { haService("fan", "turn_on",  "") }
 void ventOff() { haService("fan", "turn_off", "") }
 
 // --- cooking --------------------------------------------------------------
 
 void stop() { haPress("stop") }
 
-void setCookTime(BigDecimal m) { haSetNumber("cook_time", m) }
-
-void setCookingMode(String v) { setSelectOption("cooking_mode", v) }
-
 // --- settings -----------------------------------------------------------
-
-void setSound(String v) { setSwitchOption("sound", v) }
-void setEndSignalReminder(String v) { setSwitchOption("end_signal_reminder", v) }
-void setFilterReminder(String v) { setSwitchOption("filter_reminder", v) }
 
 void refresh() { haRefreshAll() }

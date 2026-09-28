@@ -107,22 +107,25 @@ differed (`machineState` reads `run`/`stop`/`pause`, `lockState` reads
 **Everything else is named from the entity** rather than a hardcoded list, so
 an entity LocalThings adds later shows up on its own.
 
-**Commands** for everything writable — `start`, `stop`, `pause`, `setCycle`,
-`setWasherSpinLevel`, `setCoolerSetpoint`, and the rest.
+**Commands** for the controls that work over the local connection — `start`,
+`stop`, `pause`, `setOvenSetpoint`, `setBrightnessLevel`, `setHoodFanSpeed`,
+`setCoolingSetpoint`, `setFlexZoneMode`, and the rest. Settings HA lists but
+the appliance ignores over the local connection have no command; their
+current value still shows as an attribute.
 
 **A state variable per selectable setting**, listing exactly what *your*
 appliance offers:
 
 ```
 Cycle:                Bedding, Normal, Small Load, Delicate, Self Clean+, Towels, ...
-Spin Speed:           Rinse hold, No spin, Extra Low, Low, Medium, High, Extra High
-Wash Temperature:     None, Tap Cold, Cold, Warm, Hot, Extra hot
+Spin Speed:           Rinse hold, No spin, Extra low, Low, Medium, High, Extra high
+Flex Zone Mode:       Freeze, Soft freeze, Meat/Fish, Fruit & vegetables, Beverage
 ```
 
-The matching command takes that text — `setWasherSpinLevel("Extra High")` — or the
-raw device code, so a rule can use either. Names come from Home Assistant's own
-translation table at run time, so they match what HA shows and they are right
-for whatever board your appliance has.
+Names come from Home Assistant's own translation table at run time, so they
+match what HA shows and they are right for whatever board your appliance has.
+Where a command offers a dropdown, such as the fridge's zone modes, it lists
+those same names.
 
 **`healthStatus`** — `online`, `partial` or `offline` — so a rule can tell
 "the door is closed" from "the appliance is not answering". An unavailable
