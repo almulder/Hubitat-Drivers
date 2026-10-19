@@ -1,0 +1,34 @@
+{
+  "packageName": "Restock Manager",
+  "author": "Albert Mulder",
+  "minimumHEVersion": "2.2.9",
+  "dateReleased": "2026-10-19",
+  "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Restock%20Manager",
+  "releaseNotes": "0.1.0 - Initial release: watch store products (stock & price) or any web page (text appears/disappears), per-item notifications and messages, verify-and-autofill, price-drop alerts, daily and per-item in-stock reminders.",
+  "tags": [
+    "Notifications",
+    "Tools & Utilities"
+  ],
+  "apps": [
+    {
+      "id": "6fedb511-7e67-4246-ab32-6c2f3ed0fd9a",
+      "name": "Restock Manager",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Restock%20Manager/App/Restock%20Manager.groovy",
+      "required": true,
+      "oauth": false,
+      "primary": true,
+      "version": "0.1.0"
+    },
+    {
+      "id": "eecc4355-7007-498b-b6a1-dd56577725ed",
+      "name": "Restock Manager Item",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Restock%20Manager/App/Restock%20Manager%20Item.groovy",
+      "required": true,
+      "oauth": false,
+      "primary": false,
+      "version": "0.1.0"
+    }
+  ]
+}

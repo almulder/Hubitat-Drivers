@@ -21,6 +21,16 @@
         "MQTT",
         "Misc. Devices"
       ]
+    },
+    {
+      "name": "Restock Manager",
+      "category": "Notifications",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/hpm/restock-manager.json",
+      "description": "Get notified when store products are back in stock or under your price, or when text on any web page appears or disappears. Includes in-stock reminders.",
+      "tags": [
+        "Notifications",
+        "Tools & Utilities"
+      ]
     }
   ]
 }
