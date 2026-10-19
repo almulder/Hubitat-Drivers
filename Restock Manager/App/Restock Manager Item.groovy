@@ -133,7 +133,7 @@ def installed() { initialize() }
 
 def updated() {
     // Changing what's watched starts fresh.
-    String sig = "${productUrl}|${watchType}|${skuMatch}|${watchText}|${textCondition}|${maxPrice}"
+    String sig = "${productUrl}|${watchType}|${skuMatch}|${watchText}|${textCondition}"
     if (state.configSig != sig) {
         state.alerted = false
         state.alertedPrice = null
@@ -223,7 +223,7 @@ private void verifyLinkNow() {
         if (newUrl || watchType == null) app.updateSetting("watchType", [value: "product", type: "enum"])
         if (r.name && (newUrl || !itemName)) app.updateSetting("itemName", [value: r.name, type: "text"])
         if (r.sku && (newUrl || !skuMatch)) app.updateSetting("skuMatch", [value: r.sku, type: "text"])
-        if (r.price != null && (newUrl || maxPrice == null)) app.updateSetting("maxPrice", [value: r.price, type: "decimal"])
+        if (r.price != null && newUrl) app.updateSetting("maxPrice", [value: r.price, type: "decimal"])
     } else if (looksBlocked(html)) {
         state.verify = [error: "The site returned a block, CAPTCHA, or near-empty page, so the hub can't read it. This site probably won't work."]
         return
@@ -346,6 +346,17 @@ private void fetchAsync(String purpose) {
 
 def handleResponse(resp, data) {
     String purpose = data?.purpose ?: "check"
+    try {
+        processResponse(resp, purpose)
+    } catch (ex) {
+        log.error "${displayName()}: error reading the page: ${ex}"
+        state.lastStatus = "Error"
+        updateStatusLabel()
+        if (purpose == "interval" && state.alerted) scheduleIntervalReminder()
+    }
+}
+
+private void processResponse(resp, String purpose) {
     state.lastCheck = new Date().format("yyyy-MM-dd h:mm a", location.timeZone)
 
     if (resp.hasError() || resp.status != 200) {
@@ -468,7 +479,7 @@ private Map parseProduct(String html, String needle) {
             continue
         }
         List items = (json instanceof List) ? json :
-                     ((json instanceof Map && json["@graph"]) ? json["@graph"] : [json])
+                     ((json instanceof Map && json["@graph"]) ? (json["@graph"] instanceof List ? json["@graph"] : [json["@graph"]]) : [json])
         List cands = []
         items.each { it ->
             if (it instanceof Map) {
@@ -571,7 +582,7 @@ private boolean looksBlocked(String html) {
 
 private String normalizeAvail(String s) {
     if (!s) return null
-    String t = s.tokenize("/").last().toLowerCase().replaceAll(/[^a-z]/, "")
+    String t = (s.tokenize("/") ? s.tokenize("/").last() : s).toLowerCase().replaceAll(/[^a-z]/, "")
     switch (t) {
         case "instock": case "onlineonly": case "available": return "InStock"
         case "limitedavailability": return "LimitedAvailability"
@@ -580,7 +591,7 @@ private String normalizeAvail(String s) {
         case "backorder": return "BackOrder"
         case "discontinued": return "Discontinued"
         case "instoreonly": return "InStoreOnly"
-        default: return s.tokenize("/").last()
+        default: return s.tokenize("/") ? s.tokenize("/").last() : s
     }
 }
 

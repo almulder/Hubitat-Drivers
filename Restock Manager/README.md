@@ -84,7 +84,7 @@ For a product item:
 
 Text-on-the-page items work the same way: one alert when your condition is met, and an optional message when the page changes back. Reminders are for product items only.
 
-Changing an item's link, mode, SKU, watched text or max price starts it fresh, so it can alert again on the next check.
+Changing an item's link, mode, SKU or watched text starts it fresh, so it can alert again on the next check. Changing the max price doesn't: the next check simply applies the new limit.
 
 ---
 
