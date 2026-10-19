@@ -4,7 +4,8 @@ Restock Manager watches **store product pages** and **any web page** for you, an
 
 Add as many items as you like, each with its own notification devices, message wording and reminder settings. Remove them when you're done.
 
-> **BETA:** Tested on my setup. Please expect rough edges and report anything you find.
+> **BETA:** Tested on my setup. Please expect rough edges and report anything you find in the
+> [Hubitat community thread](https://community.hubitat.com/t/beta-restock-manager-get-notified-when-products-are-back-in-stock-or-any-web-page-changes/166909).
 >
 > Restock Manager only **reads** pages and **alerts** you. It never adds anything to a cart or buys anything.
 > Provided "AS IS," without warranties of any kind.

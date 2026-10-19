@@ -4,6 +4,7 @@
   "minimumHEVersion": "2.2.9",
   "dateReleased": "2026-10-19",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Restock%20Manager",
+  "communityLink": "https://community.hubitat.com/t/beta-restock-manager-get-notified-when-products-are-back-in-stock-or-any-web-page-changes/166909",
   "releaseNotes": "0.1.0 - Initial release: watch store products (stock & price) or any web page (text appears/disappears), per-item notifications and messages, verify-and-autofill, price-drop alerts, daily and per-item in-stock reminders.",
   "tags": [
     "Notifications",
