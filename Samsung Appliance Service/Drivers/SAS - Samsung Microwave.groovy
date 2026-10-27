@@ -19,8 +19,15 @@
  *  suffix is empty. HA reports its speed as a percentage in steps of
  *  100 / speed count; this driver turns that back into Samsung's 0-4.
  *
- *  Version: 0.6.1
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - setSelectOption, for the cooking selects.
+ *    - energy is in kWh, Hubitat's EnergyMeter unit; LocalThings' Wh is converted.
+ *    - The fan speed range is only re-sent when it changes.
+ *    - A subdevice entity lands on its own subdevice1-prefixed attribute instead of overwriting the main one.
  */
 
 metadata {
@@ -63,12 +70,15 @@ metadata {
         command "setHoodFanSpeed",    [[name: "speed*", type: "NUMBER", description: "0 (off) to settableMaxFanSpeed"]]
 
         command "stop"
+        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
+                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -78,13 +88,26 @@ metadata {
 /** Library hook: names are handled in parseEntity, where light and vent need logic. */
 Map attrRenames() { return [:] }
 
-void installed() { log.info "${device.displayName} installed" }
-void updated() { log.info "${device.displayName} updated" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}) = ${e.state}"
+    beginEntity(e)
+
+    // A subdevice reading gets its scope as a prefix, so it can never
+    // overwrite the main attribute of the same name.
+    String scope = scopePrefix(e)
+    if (scope) {
+        if (e.domain == "select") {
+            rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
+            emitSelect(e, scope)
+        } else {
+            emitGeneric(e, scope)
+        }
+        return
+    }
 
     // Three-level light, from the fork's select. HA's state is the lowercase
     // translation key -- off, low, high -- which is Replica's spelling too.
@@ -119,7 +142,7 @@ void parseEntity(Map e) {
             emitOpenClosed("contact", e.state)
             return
         case "energy":
-            if (!isNullState(e.state)) emit("energy", coerce(e.state), [unit: e.unit ?: "Wh"])
+            emitEnergy("energy", e)
             return
         default:
             emitGeneric(e)
@@ -136,9 +159,10 @@ private void emitVent(Map e) {
     emitOnOff("vent", e.state)
     if (isNullState(e.state)) return
     Integer step = fanStep(e.percentageStep)
-    if (step) {
+    // The speed range only changes with the step, so only send it then.
+    if (step && (state.fanStep != step || device.currentValue("settableMaxFanSpeed") == null)) {
         int max = (int) Math.round(100.0d / step)
-        if (state.fanStep != step) state.fanStep = step
+        state.fanStep = step
         emit("settableMinFanSpeed", 0)
         emit("settableMaxFanSpeed", max)
         emit("supportedHoodFanSpeed", (0..max).toList().toString())

@@ -4,8 +4,25 @@
  *  Brings Samsung appliances into Hubitat via Home Assistant + LocalThings,
  *  grouped ONE HUBITAT DEVICE PER APPLIANCE rather than one per HA entity.
  *
- *  Version: 0.3.3
+ *  Version: 0.3.4
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.3.4
+ *    - The token is no longer kept in plain text in app state: the change
+ *      check stores a SHA-256 of the connection settings instead.
+ *    - Diagnostics visibility goes through the listener, which can reach the
+ *      appliance devices; the app could not, and failed silently.
+ *    - Test connection reports a rejected token by HTTP status, and its
+ *      result is cleared when the address or token changes.
+ *    - The appliance list refreshes for 2 minutes at most, and not at all
+ *      once the token is rejected or discovery fails.
+ *    - The naming toggle on the selection page takes effect on the list
+ *      straight away.
+ *    - Debug logging defaults off and turns itself off after 30 minutes,
+ *      including right after install.
+ *    - A plain-text fingerprint left by an older version is removed.
+ *    - New connection settings restart the 2 minute appliance scan.
+ *    - The naming preference is only pushed to the listener when it changes.
  *
  *      appliance --CoAP/DTLS--> Home Assistant + LocalThings --websocket--> Hubitat
  *
@@ -17,10 +34,10 @@
  *  open websockets and HA exposes the device registry over websocket only.
  *
  *  Install order:
- *      1. libraries/SAS-samsung-appliance-common   (library SAS-Samsung-Appliance-Common)
- *      2. drivers/SAS-samsung-listener
- *      3. the SAS appliance child drivers you need
- *      4. this app
+ *      1. Libraries/SAS-Samsung-Appliance-Common.groovy
+ *      2. Drivers/SAS - Samsung Appliance Listener.groovy
+ *      3. the Drivers/SAS - Samsung <appliance>.groovy drivers you need
+ *      4. App/SAS - Samsung Appliance Service.groovy  (this app)
  *
  *  menu: "Integrations" puts this under Hubitat's Integrations sidebar section
  *  rather than Apps. category: is documented as unused. Requires platform
@@ -28,8 +45,12 @@
  */
 
 import groovy.transform.Field
+import java.security.MessageDigest
 
-@Field static final String APP_VERSION = "0.3.3"
+@Field static final String APP_VERSION = "0.3.4"
+
+// How long the selection page keeps refreshing while it finds nothing.
+@Field static final Long SCAN_REFRESH_MS = 120000L
 
 // Plain dotted-quad only. No scheme, no port, no hostname.
 @Field static final String IPV4_RE =
@@ -94,7 +115,8 @@ Map mainPage() {
         if (connectionReady()) {
             section(sectionTitle("Test")) {
                 input name: "btnTest", type: "button", title: "Test connection"
-                if (state.testResult) {
+                // Only while it still describes what is in the fields.
+                if (state.testResult && state.testFingerprint == connectionFingerprint()) {
                     paragraph state.testOk ? ok(state.testResult) : warn(state.testResult)
                 }
             }
@@ -116,7 +138,8 @@ Map mainPage() {
         }
 
         section(sectionTitle("Logging")) {
-            input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+            input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+                  description: "Turns itself off after 30 minutes"
             input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
         }
 
@@ -143,6 +166,17 @@ Map mainPage() {
 Map discoveryPage() {
     def listener = ensureListener()
 
+    // The naming toggle below submits on change; push it before reading the
+    // list so the names shown follow it straight away rather than after Done.
+    // Only when it changed: this page refreshes every few seconds while scanning.
+    Boolean strip = (stripModel != false)
+    if (state.namingPushed != strip) {
+        try {
+            listener?.setNaming(strip)
+            state.namingPushed = strip
+        } catch (ignored) { }
+    }
+
     // Fetch BEFORE dynamicPage: refreshInterval is evaluated when the page is
     // opened, not while its body runs, so deciding it from a flag the body sets
     // meant the very first visit never refreshed -- the page said "this page
@@ -158,8 +192,19 @@ Map discoveryPage() {
     }
     String conn = listener?.currentValue("connection")
 
+    // Refresh while there is a reason to expect an answer, for two minutes at
+    // most: refreshing forever on a rejected token or an empty registry only
+    // reloads the same message.
+    if (found) {
+        state.remove("scanStartedMs")
+    } else if (state.scanStartedMs == null) {
+        state.scanStartedMs = now()
+    }
+    boolean stillScanning = !found && !failure && conn != "auth failed" && listener != null &&
+                            (now() - ((state.scanStartedMs ?: now()) as Long) < SCAN_REFRESH_MS)
+
     dynamicPage(name: "discoveryPage", title: "", install: false, uninstall: false,
-                refreshInterval: (found ? 0 : 4)) {
+                refreshInterval: (stillScanning ? 4 : 0)) {
 
         section(sectionTitle("Discovered appliances")) {
             if (!listener) {
@@ -192,6 +237,10 @@ Map discoveryPage() {
                                "<b>${failure}</b>")
             } else if (conn == "auth failed") {
                 paragraph warn("Home Assistant rejected the access token. Go back and check it.")
+            } else if (!stillScanning) {
+                paragraph warn("Nothing found yet. Check that LocalThings has appliances set up " +
+                               "in Home Assistant and that the listener is connected, then " +
+                               "press Rescan.")
             } else {
                 paragraph note("Scanning… the listener is connecting to Home Assistant and " +
                                "reading the device registry. This page refreshes every few " +
@@ -265,8 +314,9 @@ void appButtonHandler(String btn) {
             testConnection()
             break
         case "btnRescan":
-            // The page now decides its own refresh from whether it found
-            // anything, so there is no flag to set here.
+            // The page decides its own refresh from whether it found
+            // anything; restart its two-minute window.
+            state.remove("scanStartedMs")
             def l = ensureListener()
             if (l) l.discover()
             break
@@ -287,6 +337,7 @@ void testConnection() {
         timeout: 10
     ]
     if (useSSL && ignoreSSL) params.ignoreSSLIssues = true
+    state.testFingerprint = connectionFingerprint()
     try {
         httpGet(params) { resp ->
             if (resp.status == 200) {
@@ -297,14 +348,20 @@ void testConnection() {
                 state.testResult = "Home Assistant answered with HTTP ${resp.status}."
             }
         }
+    } catch (groovyx.net.http.HttpResponseException e) {
+        // The status, not the message: the message is usually just the reason
+        // phrase ("Unauthorized"), so a bad token read as "could not reach".
+        state.testOk = false
+        Integer status = e.statusCode
+        if (status == 401 || status == 403) {
+            state.testResult = "Reached ${base} but the token was rejected (HTTP ${status}). " +
+                               "Check the long-lived access token."
+        } else {
+            state.testResult = "Home Assistant at ${base} answered with HTTP ${status}: ${e.message}"
+        }
     } catch (e) {
         state.testOk = false
-        String m = e.message ?: e.toString()
-        if (m.contains("401")) {
-            state.testResult = "Reached ${base} but the token was rejected. Check the long-lived access token."
-        } else {
-            state.testResult = "Could not reach ${base}: ${m}"
-        }
+        state.testResult = "Could not reach ${base}: ${e.message ?: e.toString()}"
     }
     if (logEnable) log.debug "test connection: ${state.testResult}"
 }
@@ -342,10 +399,11 @@ def ensureListener() {
  */
 private void pushConnection(d) {
     if (!d || !connectionReady()) return
-    String fingerprint = [settings.haIp, (settings.haPort ?: 8123) as Integer,
-                          settings.haToken, (useSSL == true), (ignoreSSL == true)].join("|")
+    String fingerprint = connectionFingerprint()
     if (state.connFingerprint == fingerprint) return
     state.connFingerprint = fingerprint
+    // New settings deserve a full scan window, not what is left of the old one.
+    state.remove("scanStartedMs")
     if (logEnable) log.debug "connection settings changed -- restarting listener"
     d.setConnection([
         ip:        settings.haIp,
@@ -354,6 +412,20 @@ private void pushConnection(d) {
         ssl:       (useSSL == true),
         ignoreSsl: (ignoreSSL == true)
     ])
+}
+
+/**
+ * A hash of the connection settings, to tell when they change. Hashed because
+ * app state shows on the app's status page and in support screenshots, and
+ * the plain fingerprint carried the Home Assistant token. An install from
+ * before 0.3.4 holds the plain form, so its first page view pushes the
+ * settings to the listener once more -- a harmless reconnect.
+ */
+private String connectionFingerprint() {
+    String raw = [settings?.haIp, (settings?.haPort ?: 8123) as Integer,
+                  settings?.haToken, (useSSL == true), (ignoreSSL == true)].join("|")
+    MessageDigest md = MessageDigest.getInstance("SHA-256")
+    return md.digest(raw.getBytes("UTF-8")).encodeHex().toString()
 }
 
 private String selectionSummary() {
@@ -369,11 +441,30 @@ private String selectionSummary() {
 void installed() {
     log.info "SAS - Samsung Appliance Service ${APP_VERSION} installed"
     initialize()
+    if (logEnable) runIn(1800, "logsOff")
 }
 
 void updated() {
     log.info "SAS - Samsung Appliance Service ${APP_VERSION} updated"
     initialize()
+    if (logEnable) runIn(1800, "logsOff")
+}
+
+/**
+ * Before 0.3.4 the fingerprint was the settings joined in plain text, token
+ * included. A SHA-256 is 64 hex characters; anything else is the old form and
+ * goes, so the next page view pushes the settings once and stores the hash.
+ */
+private void clearLegacyFingerprint() {
+    def f = state.connFingerprint
+    if (f != null && !(f.toString() ==~ /[0-9a-f]{64}/)) state.remove("connFingerprint")
+    def t = state.testFingerprint
+    if (t != null && !(t.toString() ==~ /[0-9a-f]{64}/)) state.remove("testFingerprint")
+}
+
+void logsOff() {
+    log.warn "SAS - Samsung Appliance Service: debug logging disabled"
+    app.updateSetting("logEnable", [value: "false", type: "bool"])
 }
 
 void uninstalled() {
@@ -390,6 +481,7 @@ void uninstalled() {
 }
 
 void initialize() {
+    clearLegacyFingerprint()
     if (!connectionReady()) {
         log.warn "connection details incomplete -- nothing to start"
         return
@@ -400,18 +492,23 @@ void initialize() {
     // Naming preference has to land before children are created or relabelled.
     // Sent as a method call, not updateSetting: a setting written here would
     // not be readable by setSelectedAppliances in this same execution.
-    try { d.setNaming(stripModel != false) } catch (ignored) { }
+    try {
+        d.setNaming(stripModel != false)
+        state.namingPushed = (stripModel != false)
+    } catch (e) {
+        log.warn "could not push the naming preference to the listener: ${e.message}"
+    }
+
+    // The appliances are the LISTENER's children, which this app cannot reach
+    // -- the old loop here failed silently. The listener applies it to each
+    // appliance in setSelectedAppliances() below, then re-seeds.
+    try { d.setDiagnostics(exposeDiagnostics == true) } catch (e) {
+        log.warn "could not push the diagnostics setting to the listener -- is it up to date? (${e.message})"
+    }
 
     List sel = (selectedAppliances instanceof List) ? selectedAppliances :
                (selectedAppliances ? [selectedAppliances] : [])
     d.setSelectedAppliances(sel)
-
-    // Push the diagnostics preference down to every appliance child.
-    d.getChildDevices().each { c ->
-        try {
-            c.updateSetting("exposeDiagnostics", [value: (exposeDiagnostics == true) ? "true" : "false", type: "bool"])
-        } catch (ignored) { }
-    }
 }
 
 // ---------------------------------------------------------------------------

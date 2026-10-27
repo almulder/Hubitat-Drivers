@@ -5,8 +5,41 @@
  *  Service, discovers LocalThings appliances, creates one Hubitat child per
  *  appliance, and routes entity state to the right child.
  *
- *  Version: 0.4.8
+ *  Version: 0.5.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.5.0
+ *    - Subscribes only to this integration's entities (subscribe_trigger on a
+ *      state trigger) instead of every state_changed event in Home Assistant;
+ *      falls back to state_changed if Home Assistant refuses the trigger.
+ *    - No state write per inbound message: receive bookkeeping is in memory.
+ *    - Device registry, option names and categories are kept across
+ *      reconnects; a reconnect is one subscription plus one REST seed.
+ *    - Entities first seen later (a newly selected appliance) get their
+ *      categories and names fetched before they are delivered.
+ *    - A failed seed is retried with backoff, and a setup that stalls is
+ *      restarted by healthCheck instead of leaving devices silently stale.
+ *    - Rescan unsubscribes the old subscription before making a new one.
+ *    - A rejected token is not retried until the settings change or
+ *      Reconnect is pressed -- repeated bad logins can get the hub IP-banned.
+ *    - A failed registry or subscribe step reconnects; a failed translation
+ *      fetch carries on without names.
+ *    - A seed snapshot no longer overwrites a newer live event.
+ *    - Debug logging auto-off is no longer cancelled by initialize().
+ *    - Backoff resets on auth_ok rather than on socket open.
+ *    - Unanswered requests are evicted oldest first instead of all at once.
+ *    - Pushes diagnostics visibility to the appliances; prunes entities
+ *      Home Assistant no longer has after each full seed.
+ *    - A seed taken while Home Assistant is still starting can no longer
+ *      shrink the subscription: a reconnect subscribes to everything known
+ *      plus anything new, and only Rescan, a selection change or a re-read of
+ *      the registry may drop entities. A reconnect re-seeds once after 90s,
+ *      and only that later seed prunes the devices.
+ *    - Each reconnect is timed by the stall watchdog, which backs off after
+ *      repeated restarts instead of reconnecting every two minutes forever.
+ *    - A REST 401 is treated like a rejected token: no more retries.
+ *    - Overlapping fill-ins no longer overwrite each other in memory.
+ *    - A new Home Assistant address or port re-reads the registry.
  *
  *  Design notes
  *  ------------
@@ -32,7 +65,17 @@
  *    Home Assistant's own translation table (frontend/get_translations) and
  *    each entity's translation_key comes from the entity registry, fetched for
  *    just this integration's entities via config/entity_registry/get_entries.
- *    Both are cached in state, so a reconnect costs one REST seed.
+ *    Both are cached in state, so a reconnect costs one subscription and one
+ *    REST seed. Discover/Rescan, or saving this device's Preferences, fetches
+ *    them again.
+ *
+ *  * ONLY OUR ENTITIES ARE SUBSCRIBED. subscribe_trigger with a state trigger
+ *    listing this integration's entity_ids delivers the same old/new state
+ *    objects as state_changed, but only for those entities -- a busy Home
+ *    Assistant no longer streams every energy meter in the house to the hub.
+ *    With no to/from given, a state trigger also fires on attribute-only
+ *    changes, which is what the fan percentage needs. If Home Assistant
+ *    refuses it, the listener falls back to subscribe_events state_changed.
  *
  *    That matters because upstream keys cycle names per board family, and the
  *    tables CONFLICT -- washer_cycle_table_00 and _02 disagree on 15 of their
@@ -42,11 +85,37 @@
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
+import java.util.concurrent.ConcurrentHashMap
 
-@Field static final String DRIVER_VERSION = "0.4.8"
+@Field static final String DRIVER_VERSION = "0.5.0"
 
 // Reconnect backoff ladder, seconds.
 @Field static final List<Integer> BACKOFF = [5, 10, 20, 40, 80, 160, 300]
+
+// Unanswered requests kept before the oldest are dropped.
+@Field static final Integer MAX_PENDING_REQ = 50
+
+// Authenticated but no delivered seed after this long: setup stalled.
+@Field static final Long SETUP_STALL_MS = 120000L
+
+// After a stalled setup is restarted, the next restart waits twice as long,
+// up to 32 minutes, so a Home Assistant that never finishes is not hammered.
+@Field static final Integer MAX_STALL_DOUBLINGS = 4
+
+// A reconnect seed may be taken while Home Assistant is still starting and
+// only has some entities. This later seed is the one allowed to prune.
+@Field static final Integer CONFIRM_SEED_SECS = 90
+
+// Per-message bookkeeping, keyed by device id. In memory rather than state:
+// a state write re-persists everything in state -- the registry, ~10 KB of
+// name tables -- and the old code did that for every inbound message.
+@Field static final ConcurrentHashMap<String, Long> LAST_RX_MS = new ConcurrentHashMap<String, Long>()
+// entity_id -> when a live event for it was last DELIVERED, so a seed reply
+// that was snapshotted earlier does not overwrite it.
+@Field static final ConcurrentHashMap<String, Map> LAST_EVENT_MS = new ConcurrentHashMap<String, Map>()
+// Seed results waiting for registry metadata, so the first fill-in does not
+// need a second 158 KB download: [requestedAt: Long, states: Map entityId -> state].
+@Field static final ConcurrentHashMap<String, Map> PENDING_SEED = new ConcurrentHashMap<String, Map>()
 
 metadata {
     definition(
@@ -79,7 +148,8 @@ metadata {
         input name: "stripModel", type: "bool",   defaultValue: true,
               title: "Drop the board family from appliance names",
               description: "\"Samsung Dishwasher (DA_DW_A51_20_COMMON)\" becomes \"Samsung Dishwasher\""
-        input name: "logEnable", type: "bool",    title: "Enable debug logging", defaultValue: true
+        input name: "logEnable", type: "bool",    title: "Enable debug logging",
+              description: "Turns itself off after 30 minutes", defaultValue: false
         input name: "txtEnable", type: "bool",    title: "Enable descriptionText logging", defaultValue: true
     }
 }
@@ -92,17 +162,29 @@ void installed() {
     log.info "SAS - Samsung Appliance Listener ${DRIVER_VERSION} installed"
     state.reqId = 0
     initialize()
+    if (logEnable) runIn(1800, "logsOff")
 }
 
 void updated() {
     log.info "SAS - Samsung Appliance Listener ${DRIVER_VERSION} updated"
-    if (logEnable) runIn(1800, "logsOff")
+    // Saving Preferences is the user's way to say "try again": the token or
+    // language may have changed, so re-read everything from Home Assistant.
+    state.authFailed = false
+    state.forceSetup = true
+    // The preference wins once it has been saved here; the app's pushed
+    // value only stands until then.
+    state.remove("stripModel")
     initialize()
+    // After initialize(): it unschedules its own jobs, and this one must survive.
+    if (logEnable) runIn(1800, "logsOff")
 }
 
 void uninstalled() {
     closeSocket()
     removeAllAppliances()
+    LAST_RX_MS.remove(devKey())
+    LAST_EVENT_MS.remove(devKey())
+    clearPendingSeeds()
 }
 
 /**
@@ -130,13 +212,26 @@ void logsOff() {
 }
 
 void initialize() {
-    unschedule()
+    // Only this driver's connection jobs: a blanket unschedule() also
+    // cancelled the logsOff timer updated() had just set.
+    unschedule("connect")
+    unschedule("healthCheck")
+    unschedule("seedStates")
+    unschedule("confirmSeed")
     closeSocket()
     state.reqId       = 0
     state.pendingReq  = [:]
     state.authed      = false
     state.backoffIdx  = 0
     state.seeded      = false
+    state.seedFails   = 0
+    state.remove("subId")
+    state.remove("oldSubId")           // ids restart at 1 on a new socket; a stale one would cancel the new subscription
+    state.remove("subscribedIds")
+    state.remove("metaReady")          // superseded by per-entity metadata in 0.5.0
+    state.remove("lastRxMs")           // moved to memory in 0.5.0
+    state.remove("seedRequestedAt")    // carried in the request since 0.5.0
+    clearPendingSeeds()
     if (!haIp || !haToken) {
         log.warn "Home Assistant IP and token are not set yet -- open the app, fill them in " +
                  "and press Done. (If you just did, this line is harmless: it is the device " +
@@ -155,7 +250,37 @@ void refresh() {
 
 void reconnect() {
     state.backoffIdx = 0
+    state.authFailed = false
     initialize()
+}
+
+private String devKey() { return device.id.toString() }
+
+private void markRx() { LAST_RX_MS.put(devKey(), now()) }
+
+private Long lastRx() { return LAST_RX_MS.get(devKey()) }
+
+/** A fill-in held while its metadata is fetched, keyed by that request's id. */
+private String seedKey(def reqId) { return "${devKey()}:${reqId}".toString() }
+
+private void clearPendingSeeds() {
+    String prefix = devKey() + ":"
+    PENDING_SEED.keySet().removeAll { it.startsWith(prefix) }
+}
+
+private List<Map> pendingSeeds() {
+    String prefix = devKey() + ":"
+    return PENDING_SEED.findAll { k, v -> k.startsWith(prefix) }.values().toList()
+}
+
+private Map lastEventMap() {
+    Map m = LAST_EVENT_MS.get(devKey())
+    if (m == null) {
+        m = new ConcurrentHashMap()
+        Map prior = LAST_EVENT_MS.putIfAbsent(devKey(), m)
+        if (prior != null) m = prior
+    }
+    return m
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +296,11 @@ private String socketUrl() {
 }
 
 void connect() {
+    if (state.authFailed) {
+        log.warn "not reconnecting: Home Assistant rejected the access token. Fix it in the " +
+                 "app (or this device's Preferences), or press Reconnect."
+        return
+    }
     state.lastConnectMs = now()
     sendEvent(name: "connection", value: "connecting")
     String url = socketUrl()
@@ -192,8 +322,9 @@ private void closeSocket() {
 void webSocketStatus(String status) {
     if (logEnable) log.debug "webSocketStatus: ${status}"
     if (status.startsWith("status: open")) {
-        state.lastRxMs   = now()
-        state.backoffIdx = 0
+        markRx()
+        // backoffIdx is reset on auth_ok, not here: a server that accepts the
+        // socket and then drops it before auth must still back off.
         // A close we asked for with no socket open never reports back.
         state.closingOnPurpose = false
         // Do not mark connected yet -- HA will send auth_required first.
@@ -225,8 +356,10 @@ private void scheduleReconnect() {
 }
 
 void healthCheck() {
-    Long last = (state.lastRxMs ?: 0L) as Long
     if (!state.authed) {
+        // A rejected token stays rejected: retrying it every few minutes only
+        // fills Home Assistant's log, and with ip_ban_enabled bans the hub.
+        if (state.authFailed) return
         // Longer than the longest backoff step, so this only catches a
         // listener that nothing else is going to reconnect.
         Long tried = (state.lastConnectMs ?: 0L) as Long
@@ -236,6 +369,26 @@ void healthCheck() {
             connect()
         }
         return
+    }
+    // Authenticated, but the devices never got their first fill-in: a lost
+    // reply or a failed step left setup half done while pings still answer.
+    if (state.seeded != true) {
+        Long authedAt = (state.authedAtMs ?: 0L) as Long
+        Integer n = (state.stallRestarts ?: 0) as Integer
+        Long limit = SETUP_STALL_MS * (1L << Math.min(n, MAX_STALL_DOUBLINGS))
+        if (now() - authedAt > limit) {
+            log.warn "connected but setup has not finished after ${(int) (limit / 1000)}s -- reconnecting"
+            state.stallRestarts = n + 1
+            state.forceSetup = true
+            initialize()
+            return
+        }
+    }
+    Long last = lastRx()
+    if (last == null) {
+        // Memory is empty after a driver code save; start counting from now.
+        markRx()
+        last = now()
     }
     if (now() - last > 120000L) {
         log.warn "no traffic from Home Assistant in 2 minutes -- reconnecting"
@@ -262,9 +415,14 @@ private Integer sendTracked(Map msg, String purpose) {
     msg.id = id
     Map pend = (state.pendingReq instanceof Map) ? state.pendingReq : [:]
     // A request whose result never arrives would otherwise sit here forever.
-    if (pend.size() > 50) {
-        log.warn "discarding ${pend.size()} unanswered request(s)"
-        pend = [:]
+    // Drop the OLDEST ones only: clearing the lot also threw away requests
+    // still in flight, and losing an entity_meta reply stalled setup.
+    if (pend.size() >= MAX_PENDING_REQ) {
+        List<String> oldest = pend.keySet().collect { it.toString() }
+                                  .sort { it.isInteger() ? it.toInteger() : 0 }
+                                  .take(pend.size() - MAX_PENDING_REQ + 10)
+        log.warn "discarding ${oldest.size()} unanswered request(s)"
+        oldest.each { pend.remove(it) }
     }
     pend[id.toString()] = purpose
     state.pendingReq = pend
@@ -309,7 +467,7 @@ void callService(String domain, String service, def entityId, Map data = [:]) {
 // ---------------------------------------------------------------------------
 
 void parse(String description) {
-    state.lastRxMs = now()
+    markRx()
     Map msg
     try {
         msg = (Map) new groovy.json.JsonSlurper().parseText(description)
@@ -326,18 +484,25 @@ void parse(String description) {
 
         case "auth_ok":
             log.info "authenticated to Home Assistant ${msg.ha_version}"
-            state.authed = true
-            // Re-read categories and name tables on every connect, so the
-            // stored copy never outlives a change in Home Assistant or here.
-            state.metaReady = false
+            state.authed     = true
+            state.authFailed = false
+            state.backoffIdx = 0
+            state.authedAtMs = now()
+            // Not seeded until this connection's fill-in lands, so a reconnect
+            // that stalls is caught by healthCheck too.
+            state.seeded     = false
             sendEvent(name: "connection", value: "connected")
-            // Registry first: nothing can be routed until we know the devices.
-            sendTracked([type: "config/device_registry/list"], "device_registry")
+            // The registry, name tables and categories survive a reconnect;
+            // only a first connect, Rescan or a Preferences save re-reads them.
+            if (haveSetup()) startStream()
+            else startSetup()
             break
 
         case "auth_invalid":
-            log.error "Home Assistant rejected the access token: ${msg.message}"
-            state.authed = false
+            log.error "Home Assistant rejected the access token: ${msg.message}. Not retrying " +
+                      "until the token is changed or Reconnect is pressed."
+            state.authed     = false
+            state.authFailed = true
             sendEvent(name: "connection", value: "auth failed")
             closeSocket()
             break
@@ -358,25 +523,146 @@ void parse(String description) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Connect sequence
+// ---------------------------------------------------------------------------
+//
+//   first connect:  device_registry -> translations -> seed -> subscribe
+//                   -> entity_meta for the new entities -> deliver
+//   reconnect:      subscribe (cached entity list) -> seed -> deliver
+//
+// A seed is never delivered for an entity whose registry metadata has not
+// arrived, so nothing is routed on a guess about categories or names.
+
+private Boolean haveSetup() {
+    return (state.devices instanceof Map) && (state.labelTables instanceof Map) &&
+           (state.forceSetup != true)
+}
+
+private void startSetup() {
+    // A fresh registry read: this setup's seed may drop entities it no longer finds.
+    state.fullSeedPending = true
+    if (state.forceSetup == true) {
+        // Re-read categories too, and give subscribe_trigger another chance.
+        state.entityMeta = [:]
+        state.remove("triggerUnsupported")
+    }
+    // Registry first: nothing can be routed until we know the devices.
+    sendTracked([type: "config/device_registry/list"], "device_registry")
+}
+
+private void startStream() {
+    state.remove("forceSetup")
+    List ids = (state.entityIds instanceof List) ? (List) state.entityIds : []
+    // Subscribe before seeding so nothing that changes mid-seed is lost. On a
+    // first connect the entity list is not known yet, so the seed goes first
+    // and subscribes for what it finds.
+    if (ids || state.triggerUnsupported) subscribeEntities(ids, true)
+    else seedStates()
+}
+
+/**
+ * Subscribe to state changes for exactly these entities.
+ *
+ * The new subscription is made FIRST and the old one dropped once Home
+ * Assistant confirms it, so changing the entity list never leaves a gap; an
+ * event delivered by both is harmless, the children de-duplicate.
+ */
+private void subscribeEntities(List ids, boolean thenSeed) {
+    if (state.subId != null) {
+        if (state.oldSubId == null) {
+            state.oldSubId = state.subId
+        } else {
+            // Two changes before the first was confirmed: the middle one goes.
+            sendTracked([type: "unsubscribe_events", subscription: state.subId as Integer], "unsubscribe")
+        }
+        state.remove("subId")
+    }
+    if (state.triggerUnsupported) {
+        state.remove("subscribedIds")
+        state.subId = sendTracked([type: "subscribe_events", event_type: "state_changed"],
+                                  thenSeed ? "suball_seed" : "suball")
+        return
+    }
+    if (!ids) {
+        state.subscribedIds = []
+        dropOldSubscription()
+        if (thenSeed) seedStates()
+        return
+    }
+    state.subscribedIds = ids
+    // No to/from: a state trigger then also fires on attribute-only changes.
+    // `platform` rather than the newer `trigger` key, which older Home
+    // Assistant releases do not accept.
+    state.subId = sendTracked([type: "subscribe_trigger",
+                               trigger: [platform: "state", entity_id: ids]],
+                              thenSeed ? "sub_seed" : "sub")
+}
+
+private void dropOldSubscription() {
+    if (state.oldSubId == null) return
+    sendTracked([type: "unsubscribe_events", subscription: state.oldSubId as Integer], "unsubscribe")
+    state.remove("oldSubId")
+}
+
+/** A step the connection cannot do without failed: say so and start over. */
+private void restartAfterError(String what) {
+    log.error "${what} -- reconnecting"
+    sendEvent(name: "connection", value: "error")
+    closeSocket()
+    scheduleReconnect()
+}
+
 private void handleResult(Map msg) {
     Map pend = (state.pendingReq instanceof Map) ? state.pendingReq : [:]
     String purpose = pend.remove(msg.id?.toString())
     state.pendingReq = pend
 
     if (msg.success == false) {
-        log.error "request ${purpose ?: msg.id} failed: ${msg.error?.message}"
-        if (purpose == "entity_meta") {
-            // Fill the devices in anyway rather than leave them empty;
-            // without categories, diagnostic entities simply show.
-            state.metaReady = true
-            seedStates()
+        String why = msg.error?.message
+        switch (purpose) {
+            case "device_registry":
+                restartAfterError("could not read the device registry: ${why}")
+                break
+            case "translations":
+                // Names are a nicety: carry on with raw codes rather than stop.
+                log.warn "could not read option names (${why}) -- options will show as raw codes"
+                if (!(state.labelTables instanceof Map)) state.labelTables = [:]
+                startStream()
+                break
+            case "sub":
+            case "sub_seed":
+                log.warn "Home Assistant refused subscribe_trigger (${why}) -- " +
+                         "falling back to every state_changed event"
+                if (state.subId == msg.id) state.remove("subId")
+                state.triggerUnsupported = true
+                subscribeEntities([], purpose == "sub_seed")
+                break
+            case "suball":
+            case "suball_seed":
+                if (state.subId == msg.id) state.remove("subId")
+                restartAfterError("could not subscribe to state changes: ${why}")
+                break
+            case "entity_meta":
+                // Fill the devices in anyway rather than leave them empty;
+                // without categories, diagnostic entities simply show.
+                log.error "could not read entity metadata: ${why} -- filling devices in without it"
+                Map ps = PENDING_SEED.get(seedKey(msg.id))
+                storeEntityMeta([:], (List) ps?.metaIds)
+                deliverPendingSeed(msg.id)
+                break
+            case "unsubscribe":
+                if (logEnable) log.debug "unsubscribe: ${why}"
+                break
+            default:
+                log.error "request ${purpose ?: msg.id} failed: ${why}"
         }
         return
     }
 
     switch (purpose) {
         case "device_registry":
-            storeDeviceRegistry((List) msg.result)
+            storeDeviceRegistry((msg.result instanceof List) ? (List) msg.result : [])
             sendTracked([type    : "frontend/get_translations",
                          language: (haLanguage ?: "en"),
                          category: "entity",
@@ -384,20 +670,23 @@ private void handleResult(Map msg) {
             break
 
         case "translations":
-            storeTranslations((Map) msg.result?.resources)
-            // Subscribe before seeding so nothing that changes mid-seed is lost.
-            sendTracked([type: "subscribe_events", event_type: "state_changed"], "subscribe")
+            storeTranslations((msg.result instanceof Map) ? (Map) msg.result.resources : null)
+            startStream()
             break
 
         case "entity_meta":
-            storeEntityMeta((Map) msg.result)
-            // The first fill-in waits for this; deliver it now.
-            seedStates()
+            storeEntityMeta((msg.result instanceof Map) ? (Map) msg.result : [:],
+                            (List) PENDING_SEED.get(seedKey(msg.id))?.metaIds)
+            deliverPendingSeed(msg.id)
             break
 
-        case "subscribe":
-            if (logEnable) log.debug "subscribed to state_changed"
-            seedStates()
+        case "sub":
+        case "sub_seed":
+        case "suball":
+        case "suball_seed":
+            if (logEnable) log.debug "subscribed (${purpose})"
+            dropOldSubscription()
+            if (purpose.endsWith("_seed")) seedStates()
             break
 
         default:
@@ -406,12 +695,34 @@ private void handleResult(Map msg) {
 }
 
 private void handleEvent(Map msg) {
-    Map data = (Map) msg.event?.data
-    if (!data) return
-    Map newState = (Map) data.new_state
-    if (!newState) return
-    if (state.metaReady != true) return      // the first fill-in is on its way
-    routeEntity((String) data.entity_id, newState, true)
+    // Only our current subscription (or the one it is replacing).
+    def mid = msg.id
+    if (mid == null || (mid != state.subId && mid != state.oldSubId)) return
+    Map ev = (Map) msg.event
+    if (!ev) return
+
+    String entityId = null
+    Map newState = null
+    if (ev.data instanceof Map) {                       // subscribe_events state_changed
+        entityId = (String) ev.data.entity_id
+        newState = (Map) ev.data.new_state
+    } else if (ev.variables instanceof Map) {           // subscribe_trigger
+        Map trig = (Map) ((Map) ev.variables).trigger
+        entityId = (String) trig?.entity_id
+        newState = (Map) trig?.to_state
+    }
+    if (!entityId || !newState) return
+
+    Map meta = (state.entityMeta instanceof Map) ? (Map) state.entityMeta : [:]
+    if (!meta.containsKey(entityId)) {
+        // Not ours, or ours but still waiting for its metadata: keep the
+        // newer state for the pending fill-in so it is not lost.
+        pendingSeeds().each { Map ps ->
+            if (((Map) ps.states).containsKey(entityId)) ((Map) ps.states)[entityId] = newState
+        }
+        return
+    }
+    if (routeEntity(entityId, newState, true) != null) lastEventMap().put(entityId, now())
 }
 
 // ---------------------------------------------------------------------------
@@ -483,9 +794,9 @@ private void storeDeviceRegistry(List registry) {
  *
  * Mirrors the upstream registry set in
  * mbillow/localthings/custom_components/localthings/registry/by_type/.
- * `driver` is the Hubitat driver name; null means LocalThings supports the
- * type but this package does not have a driver for it yet, which the app
- * reports as "driver not available" rather than "unrecognised".
+ * `type` is the appliance type; driverNameFor() turns it into the Hubitat
+ * driver name. A name that matches no row has no driver in this package, and
+ * the app lists it as "no driver yet".
  */
 @Field static final String DRIVER_PREFIX = "SAS - Samsung "
 
@@ -513,16 +824,11 @@ private void storeDeviceRegistry(List registry) {
     [tokens: ["ehs", "heat pump"],               type: "Heat Pump"]
 ]
 
-/** Hubitat driver name for this appliance, or null if we have none yet. */
+/** Appliance type for this device name, or null if this package has no driver for it. */
 String detectType(String name, String model) {
     String n = (name ?: "").toLowerCase()
     Map hit = TYPE_TABLE.find { Map t -> t.tokens.any { n.contains(it) } }
-    if (!hit) return null
-    if (!hit.type) {
-        log.warn "'${name}' is a LocalThings type this package has no driver for yet"
-        return null
-    }
-    return (String) hit.type
+    return hit ? (String) hit.type : null
 }
 
 /** Hubitat driver name for a bare appliance type. */
@@ -592,29 +898,34 @@ private void storeTranslations(Map resources) {
  * entity_ids, so this costs one round trip rather than the 485 KB the full
  * registry listing would.
  */
-private void storeEntityMeta(Map entries) {
-    Map meta = [:]
+private void storeEntityMeta(Map entries, List requested) {
+    Map meta = (state.entityMeta instanceof Map) ? (Map) state.entityMeta : [:]
+    // Every entity asked about gets an entry, even an empty one: an entry is
+    // what says "metadata settled, this entity can be delivered".
+    (requested ?: []).each { String id -> if (!meta.containsKey(id)) meta[id] = [:] }
+    int carried = 0
     entries?.each { k, v ->
-        if (!(v instanceof Map)) return
-        Map e = (Map) v
         Map rec = [:]
-        if (e.translation_key) rec.tk = e.translation_key
-        // Only diagnostic is hidden. `config` entities are real settings
-        // (a fridge's zone modes, spin speed) and must reach the device.
-        if (e.entity_category == "diagnostic") rec.cat = "diagnostic"
-        if (rec) meta[k.toString()] = rec
+        if (v instanceof Map) {
+            Map e = (Map) v
+            if (e.translation_key) rec.tk = e.translation_key
+            // Only diagnostic is hidden. `config` entities are real settings
+            // (a fridge's zone modes, spin speed) and must reach the device.
+            if (e.entity_category == "diagnostic") rec.cat = "diagnostic"
+        }
+        if (rec) carried++
+        meta[k.toString()] = rec
     }
     state.entityMeta = meta
-    state.metaReady = true
-    log.info "entity metadata: ${meta.size()} of ${entries?.size() ?: 0} entities carry a " +
+    log.info "entity metadata: ${carried} of ${entries?.size() ?: 0} entities carry a " +
              "translation key or category"
 }
 
-/** Ask for metadata on the appliance entities we just routed. */
-private void requestEntityMeta(List<String> entityIds) {
-    if (!entityIds) return
+/** Ask for metadata on appliance entities we have not seen before. */
+private Integer requestEntityMeta(List<String> entityIds) {
+    if (!entityIds) return null
     if (logEnable) log.debug "requesting registry metadata for ${entityIds.size()} entities"
-    sendTracked([type: "config/entity_registry/get_entries", entity_ids: entityIds], "entity_meta")
+    return sendTracked([type: "config/entity_registry/get_entries", entity_ids: entityIds], "entity_meta")
 }
 
 /** The name Home Assistant would show for a raw select code. */
@@ -653,7 +964,13 @@ String selectCodeFor(String entityId, String value) {
 // Seeding: pull every entity's current state so children populate immediately
 // ---------------------------------------------------------------------------
 
-void seedStates() {
+/**
+ * opts.confirm marks the re-seed a reconnect schedules: Home Assistant has had
+ * time to load every entity, so this one may prune. A full seed (setup,
+ * Rescan, a selection change) may also shrink the entity list.
+ */
+void seedStates(Map opts = null) {
+    if (!state.authed) return
     Map params = [
         uri:     baseUrl(),
         path:    "/api/states",
@@ -662,45 +979,141 @@ void seedStates() {
     ]
     if (ignoreSSL) params.ignoreSSLIssues = true
     if (logEnable) log.debug "seeding state from ${baseUrl()}/api/states"
-    asynchttpGet("seedResponse", params)
+    // A live event delivered after this moment is newer than the snapshot.
+    // Carried in the request, so overlapping seeds each keep their own.
+    Map cb = [requestedAt: now(), full: (state.fullSeedPending == true), confirm: (opts?.confirm == true)]
+    asynchttpGet("seedResponse", params, cb)
+}
+
+/** Scheduled after a reconnect seed. */
+void confirmSeed() { seedStates([confirm: true]) }
+
+private void seedFailed(String why) {
+    Integer n = ((state.seedFails ?: 0) as Integer) + 1
+    state.seedFails = n
+    Integer wait = BACKOFF[Math.min(n - 1, BACKOFF.size() - 1)]
+    log.error "state seed failed: ${why} -- retrying in ${wait}s"
+    sendEvent(name: "lastMessage", value: "state seed failed: ${why}")
+    if (state.authed) runIn(wait, "seedStates")
 }
 
 void seedResponse(hubitat.scheduling.AsyncResponse resp, Map cbData) {
+    if (resp.status == 401) {
+        // Same token as the websocket: retrying only adds failed logins.
+        log.error "Home Assistant rejected the token for REST (HTTP 401). Not retrying " +
+                  "until the token is changed or Reconnect is pressed."
+        state.authFailed = true
+        sendEvent(name: "connection", value: "auth failed")
+        sendEvent(name: "lastMessage", value: "REST seed rejected the token (HTTP 401)")
+        closeSocket()
+        return
+    }
     if (resp.hasError()) {
-        log.error "state seed failed: ${resp.getErrorMessage()}"
+        seedFailed(resp.getErrorMessage())
         return
     }
     List states
     try {
         states = (List) resp.json
     } catch (e) {
-        log.error "could not parse /api/states: ${e.message}"
+        seedFailed("could not parse /api/states: ${e.message}")
         return
     }
-    // First connect, or after a rediscovery: learn which entities are ours,
-    // then ask Home Assistant for their categories and name tables BEFORE
-    // handing anything to a device, so nothing is routed on a guess. The
-    // registry's answer triggers this seed again, which then delivers.
-    boolean deliver = (state.metaReady == true)
-    int routed = 0
-    List<String> mine = []
+    if (states == null) { seedFailed("empty /api/states reply"); return }
+    state.seedFails = 0
+    Long requestedAt = (cbData?.requestedAt ?: 0L) as Long
+    boolean full    = (cbData?.full == true)
+    boolean confirm = (cbData?.confirm == true)
+    if (full) state.remove("fullSeedPending")
+
+    // Which entities are ours, i.e. belong to an appliance with a device.
+    Map matched = [:]
     states.each { Map s ->
-        if (routeEntity((String) s.entity_id, s, deliver)) {
-            routed++
-            mine << (String) s.entity_id
+        String id = (String) s?.entity_id
+        if (id && routeEntity(id, s, false) != null) matched[id] = s
+    }
+    List<String> ids = matched.keySet().collect { it.toString() }
+
+    // Keep the cached list and the subscription in step with what we route.
+    // Only a full seed may shrink them: a reconnect seed can arrive while Home
+    // Assistant is still loading, and would otherwise unsubscribe entities
+    // that are merely late.
+    List cached = (state.entityIds instanceof List) ? (List) state.entityIds : []
+    List keep = full ? ids : (cached + ids).unique()
+    if ((cached as Set) != (keep as Set)) state.entityIds = keep
+    if (full) lastEventMap().keySet().retainAll(ids)
+    if (!state.triggerUnsupported) {
+        List subscribed = (state.subscribedIds instanceof List) ? (List) state.subscribedIds : null
+        if (subscribed == null || (subscribed as Set) != (keep as Set)) subscribeEntities(keep, false)
+    }
+    // A reconnect seed gets one more look once Home Assistant has settled;
+    // that one may prune.
+    boolean prune = full || confirm
+    if (!prune) runIn(CONFIRM_SEED_SECS, "confirmSeed")
+
+    // First connect, or a newly selected appliance: ask Home Assistant for
+    // these entities' categories and name tables BEFORE handing anything to a
+    // device, so nothing is routed on a guess. The snapshot waits in memory
+    // instead of being downloaded a second time.
+    Map meta = (state.entityMeta instanceof Map) ? (Map) state.entityMeta : [:]
+    List<String> missing = ids.findAll { !meta.containsKey(it) }
+    if (missing) {
+        log.info "found ${missing.size()} new appliance entities -- asking Home Assistant which are diagnostic"
+        Integer reqId = requestEntityMeta(missing)
+        if (reqId != null) {
+            PENDING_SEED.put(seedKey(reqId), [requestedAt: requestedAt, states: matched,
+                                              metaIds: missing, prune: prune])
+            return
         }
     }
-    if (!deliver) {
-        if (mine) {
-            log.info "found ${routed} appliance entities -- asking Home Assistant which are diagnostic"
-            requestEntityMeta(mine)
-        }
+    deliverSeed(matched, requestedAt, states.size(), prune)
+}
+
+/** Deliver a snapshot held while its metadata was fetched. */
+private void deliverPendingSeed(def reqId) {
+    Map ps = PENDING_SEED.remove(seedKey(reqId))
+    if (ps == null) {
+        // Lost (a driver code save clears memory): fetch it again.
+        seedStates()
         return
+    }
+    deliverSeed((Map) ps.states, (ps.requestedAt ?: 0L) as Long, null, ps.prune == true)
+}
+
+private void deliverSeed(Map states, Long requestedAt, Integer total, boolean prune) {
+    Map lastEv = lastEventMap()
+    Map<String, List> keysByChild = [:]
+    int routed = 0
+    int newer = 0
+    states.each { k, v ->
+        String id = k.toString()
+        // A live event that arrived after the snapshot was requested is
+        // at least as new as the snapshot: keep it.
+        Long ev = (lastEv.get(id) != null) ? (lastEv.get(id) as Long) : null
+        boolean stale = (ev != null && requestedAt && ev > requestedAt)
+        if (stale) newer++
+        Map info = routeEntity(id, (Map) v, !stale)
+        if (info == null) return
+        routed++
+        List keys = keysByChild[(String) info.dni]
+        if (keys == null) { keys = []; keysByChild[(String) info.dni] = keys }
+        keys << info.key
+    }
+    // Every entity Home Assistant still has was just seen: let each device
+    // forget the ones it no longer has. Not on a reconnect seed, which may
+    // predate Home Assistant finishing its own startup.
+    if (prune) keysByChild.each { String dni, List keys ->
+        def child = getChildDevice(dni)
+        try { child?.pruneEntities(keys) } catch (e) {
+            if (logEnable) log.debug "${child?.displayName}: pruneEntities unavailable (${e.message})"
+        }
     }
     state.seeded = true
-    log.info "seeded ${routed} appliance entities from ${states.size()} Home Assistant entities"
+    state.remove("stallRestarts")
+    String from = (total != null) ? " from ${total} Home Assistant entities" : ""
+    log.info "seeded ${routed} appliance entities${from}" +
+             (newer ? " (${newer} already newer from live events)" : "")
     sendEvent(name: "lastMessage", value: "seeded ${routed} entities")
-
 }
 
 // ---------------------------------------------------------------------------
@@ -708,13 +1121,14 @@ void seedResponse(hubitat.scheduling.AsyncResponse resp, Map cbData) {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve an entity to its owning device by longest slug prefix, then hand it
- * to that appliance's child. Returns true when it belonged to us.
+ * Resolve an entity to its owning device by longest slug prefix, and when
+ * `deliver` is set hand it to that appliance's child. Returns null when it
+ * is not ours, otherwise [dni: child DNI, key: "scope:suffix"].
  */
-private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
-    if (!entityId) return false
+private Map routeEntity(String entityId, Map stateObj, boolean deliver) {
+    if (!entityId || stateObj == null) return null
     Map devices = (state.devices instanceof Map) ? state.devices : [:]
-    if (!devices) return false
+    if (!devices) return null
 
     String obj = entityId.contains(".") ? entityId.substring(entityId.indexOf(".") + 1) : entityId
 
@@ -734,7 +1148,7 @@ private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
             }
         }
     }
-    if (best == null) return false
+    if (best == null) return null
 
     // A subdevice (range second cavity) belongs to its parent appliance, not
     // to a Hubitat device of its own.
@@ -752,11 +1166,14 @@ private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
         }
     }
 
-    def child = getChildDevice(childDni((String) owner.id))
-    if (!child) return false
-    if (!deliver) return true
+    String dni = childDni((String) owner.id)
+    def child = getChildDevice(dni)
+    if (!child) return null
 
     String suffix = (obj == bestSlug) ? "" : obj.substring(bestSlug.length() + 1)
+    Map info = [dni: dni, key: "${scope}:${suffix}".toString()]
+    if (!deliver) return info
+
     Map attrs = (stateObj.attributes instanceof Map) ? (Map) stateObj.attributes : [:]
 
     Map payload = [
@@ -776,8 +1193,8 @@ private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
         // Resolved here, not in the child: only the listener holds the
         // translation table and the entity's translation_key.
         label       : labelFor(entityId, stateObj.state),
-        optionLabels: attrs.options ? ((List) attrs.options).collect {
-                          labelFor(entityId, it) ?: it.toString() } : null
+        optionLabels: (attrs.options instanceof List) ? ((List) attrs.options).collect {
+                          labelFor(entityId, it) ?: it?.toString() } : null
     ]
 
     try {
@@ -785,7 +1202,7 @@ private Boolean routeEntity(String entityId, Map stateObj, boolean deliver) {
     } catch (e) {
         log.error "child ${child.displayName} failed on ${entityId}: ${e.message}"
     }
-    return true
+    return info
 }
 
 /**
@@ -836,6 +1253,11 @@ private void noteUnlabeled(String tk, String code) {
 // it, so that a library problem can never take the listener itself down)
 // ---------------------------------------------------------------------------
 
+// KNOWN LIMIT: Home Assistant transliterates with unidecode, so "Café" slugs
+// to "cafe"; this keeps the accented letter. A device name with non-ASCII
+// letters will not route. LocalThings names its devices in English, so this
+// has not come up, and the Java text normaliser that would fix it is not on
+// Hubitat's allowed-class list as far as is known.
 String slugify(String name) {
     if (!name) return ""
     StringBuilder out = new StringBuilder()
@@ -851,17 +1273,6 @@ String slugify(String name) {
     while (s.startsWith("_")) { s = s.substring(1) }
     while (s.endsWith("_"))   { s = s.substring(0, s.length() - 1) }
     return s
-}
-
-String suffixOf(String entityId, String deviceName) {
-    if (!entityId) return ""
-    String obj = entityId.contains(".") ? entityId.substring(entityId.indexOf(".") + 1) : entityId
-    if (deviceName) {
-        String prefix = slugify(deviceName)
-        if (obj == prefix) return ""
-        if (obj.startsWith(prefix + "_")) return obj.substring(prefix.length() + 1)
-    }
-    return obj
 }
 
 String snakeToCamel(String s) {
@@ -881,6 +1292,12 @@ private String childDni(String haDeviceId) { return "samsung-${haDeviceId}" }
 
 /** Called by the app after the user edits connection settings. */
 void setConnection(Map cfg) {
+    // Another address or port may be another Home Assistant, with its own
+    // registry, names and entity list: read them all again.
+    if (cfg.ip?.toString() != haIp?.toString() || cfg.port?.toString() != haPort?.toString()) {
+        state.forceSetup = true
+        state.remove("entityIds")
+    }
     device.updateSetting("haIp",     [value: cfg.ip,    type: "text"])
     device.updateSetting("haPort",   [value: cfg.port,  type: "number"])
     device.updateSetting("haToken",  [value: cfg.token, type: "password"])
@@ -890,9 +1307,11 @@ void setConnection(Map cfg) {
     // MUST be deferred. updateSetting() does not refresh the `settings` map for
     // the execution that called it, so initialize() running inline would read
     // the OLD values -- null on a fresh install -- decide the credentials were
-    // missing, and never retry. One second is enough to land in a new
-    // execution where the settings are visible.
-    runIn(1, "initialize")
+    // missing, and never retry. Two seconds lands in a new execution where
+    // the settings are visible, and is the same slot setSelectedAppliances()
+    // uses, so the two collapse into one restart instead of two.
+    state.authFailed = false            // a new token deserves a try
+    runIn(2, "initialize")
 }
 
 /**
@@ -900,10 +1319,36 @@ void setConnection(Map cfg) {
  *
  * Kept in state rather than a setting for the same reason: the app sets this
  * and then immediately asks for the children to be created, and a setting
- * written in that execution would not be readable yet.
+ * written in that execution would not be readable yet. The setting is
+ * written too, so this device's Preferences show the same thing; saving them
+ * clears the state copy and the preference takes over.
  */
 void setNaming(Boolean strip) {
-    state.stripModel = (strip != false)
+    boolean s = (strip != false)
+    state.stripModel = s
+    device.updateSetting("stripModel", [value: s ? "true" : "false", type: "bool"])
+}
+
+/**
+ * Diagnostics visibility, pushed by the app. Applied to every appliance by
+ * setSelectedAppliances(), which the app calls straight after, and which
+ * re-seeds so newly visible entities fill in at once.
+ */
+void setDiagnostics(Boolean expose) {
+    state.exposeDiagnostics = (expose == true)
+}
+
+private void applyDiagnosticsToChildren() {
+    if (state.exposeDiagnostics == null) return
+    Boolean expose = (state.exposeDiagnostics == true)
+    (getChildDevices() ?: []).each { c ->
+        try {
+            c.applyDiagnosticsSetting(expose)
+        } catch (e) {
+            log.warn "${c.displayName}: could not apply the diagnostics setting (${e.message}) -- " +
+                     "is its driver and the SAS library up to date?"
+        }
+    }
 }
 
 private Boolean stripModelActive() {
@@ -913,11 +1358,13 @@ private Boolean stripModelActive() {
 
 void discover() {
     // Re-read names and categories too: the user may have added an appliance
-    // of a different board family, needing a different name table.
-    state.metaReady = false
-    state.entityMeta = [:]
+    // of a different board family, needing a different name table. The
+    // existing subscription is replaced, not added to, once setup re-runs.
+    state.forceSetup = true
     if (!state.authed) { initialize(); return }
-    sendTracked([type: "config/device_registry/list"], "device_registry")
+    state.seeded = false
+    state.authedAtMs = now()           // the stall watchdog times this run
+    startSetup()
 }
 
 Boolean isConnected() { return state.authed == true }
@@ -1001,11 +1448,20 @@ void setSelectedAppliances(List selectedIds) {
     }
 
     sendEvent(name: "appliances", value: getChildDevices().size())
+    applyDiagnosticsToChildren()
     if (state.authed) {
+        // Finds any new appliance's entities, fetches their metadata before
+        // delivering them, and extends the subscription to cover them. A
+        // selection change may also drop a removed appliance's entities.
+        state.fullSeedPending = true
         seedStates()
     } else {
         // Connecting ends in a full seed, so new devices fill in either way.
+        // Deferred, not inline: when the app has just pushed new connection
+        // settings they are not readable in this execution, and an inline
+        // initialize() here also cancelled that deferred restart -- so the
+        // old token was used until the next healthCheck retry.
         log.info "not connected to Home Assistant -- connecting so the appliance devices fill in"
-        initialize()
+        runIn(2, "initialize")
     }
 }

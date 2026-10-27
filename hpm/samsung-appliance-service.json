@@ -1,0 +1,186 @@
+{
+  "packageName": "SAS - Samsung Appliance Service",
+  "author": "Albert Mulder",
+  "minimumHEVersion": "2.3.4",
+  "dateReleased": "2026-10-26",
+  "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Samsung%20Appliance%20Service",
+  "releaseNotes": "BREAKING CHANGES - check your rules before upgrading: (1) Energy is now kWh, 1000x smaller: Dishwasher/Dryer/Microwave energy; Washer energy, energySaved; Refrigerator energy, energySaved, energyThisMonth, energyLastMonth, powerEnergy. (2) Temperatures are converted to the hub scale and setpoint commands take hub-scale values; a setpoint is refused until the appliance reports its unit. (3) Air Conditioner temperature is now the room reading; outdoor moved to outdoorTemperature; AC gains Switch. (4) Induction Cooktop temperature is now the probe reading; the target moved to probeTargetTemperature. (5) Air Monitor/Vacuum Station battery is numeric. (6) Dishwasher filterUsage is a number. (7) Cooktop mainTimerState is a string. (8) Subdevice select attributes renamed Subdevice1X to subdevice1X, and subdevice readings no longer overwrite main attributes. (9) Refrigerator setFlexZoneMode/setPantryZoneMode are free text. (10) Debug logging is off by default and turns itself off after 30 minutes. Also: Listener 0.5.0 subscribes only to your appliances, keeps registry data across reconnects, recovers from stalled setup with backoff, never shrinks the subscription from a partial seed, and stops retrying a rejected token. Library 0.7.0 no longer delays trailing values, writes less state, and refuses unsafe setpoints. App 0.3.4 no longer stores the token in plain text. Drivers 0.7.0: Washer/Dryer cycle, option and delay-start commands; Oven/Range start refuses a bad mode, time or setpoint; setSelectOption on every driver with selects; Air Purifier/Range Hood setFan fixed; Battery, Humidity and CO2 capabilities.",
+  "tags": [
+    "Misc. Devices"
+  ],
+  "bundles": [
+    {
+      "id": "fd127b15-6271-4aed-84bf-017198844ad1",
+      "name": "SAS-Samsung-Appliance-Common",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Bundles/SAS-Samsung-Appliance-Common.zip",
+      "required": true
+    }
+  ],
+  "apps": [
+    {
+      "id": "73c6c6c4-742d-4bcc-81f5-784c0d6cb95c",
+      "name": "SAS - Samsung Appliance Service",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/App/SAS%20-%20Samsung%20Appliance%20Service.groovy",
+      "required": true,
+      "oauth": false,
+      "primary": true,
+      "version": "0.3.4"
+    }
+  ],
+  "drivers": [
+    {
+      "id": "4d43ffd6-aa57-4316-821c-f2db00b40d6e",
+      "name": "SAS - Samsung Appliance Listener",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Appliance%20Listener.groovy",
+      "required": true,
+      "version": "0.5.0"
+    },
+    {
+      "id": "a4d78c30-be2e-4aef-bc0d-1450cfa5660b",
+      "name": "SAS - Samsung Air Conditioner",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Air%20Conditioner.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "52f912da-bd9a-47fa-85a7-6c24d4df91a8",
+      "name": "SAS - Samsung Air Dresser",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Air%20Dresser.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "f49e191f-828e-4781-9662-4c657be957b5",
+      "name": "SAS - Samsung Air Monitor",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Air%20Monitor.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "f77429ce-b511-4e2d-aa43-4d5b84842b37",
+      "name": "SAS - Samsung Air Purifier",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Air%20Purifier.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "34ca8fe8-3421-4a52-9806-05de36cc8755",
+      "name": "SAS - Samsung Cooktop",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Cooktop.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "aad6cbb6-fcda-460d-bbaa-fc19b664b9c3",
+      "name": "SAS - Samsung Dehumidifier",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Dehumidifier.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "f34680d7-4982-401d-aa8d-86b976c2c434",
+      "name": "SAS - Samsung Dishwasher",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Dishwasher.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "eedbcea7-dae3-4876-9252-0913a42ca9cb",
+      "name": "SAS - Samsung Dryer",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Dryer.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "fb23cada-27a7-4371-bc9a-33f04c64673f",
+      "name": "SAS - Samsung Heat Pump",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Heat%20Pump.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "01c73534-4908-4d64-8cce-c2d403913aa4",
+      "name": "SAS - Samsung Induction Cooktop",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Induction%20Cooktop.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "ca5060f7-90cd-4701-846f-90c9faa99aac",
+      "name": "SAS - Samsung Microwave",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Microwave.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "4065284a-1707-4bc4-956f-c372209cdaaf",
+      "name": "SAS - Samsung Oven",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Oven.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "a639ee16-ad3e-4259-a79f-28a3e45bc002",
+      "name": "SAS - Samsung Range",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Range.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "72415bd8-bdc0-400a-9ea8-18bfb9e37681",
+      "name": "SAS - Samsung Range Hood",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Range%20Hood.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "159ce0e3-2a58-410b-a7a5-3c8b8211337a",
+      "name": "SAS - Samsung Refrigerator",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Refrigerator.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "0ed25701-3eaf-4085-9760-bcebd7d9dd20",
+      "name": "SAS - Samsung Vacuum Station",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Vacuum%20Station.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "9ebce9f6-0f95-44b1-8414-ef8cf004218b",
+      "name": "SAS - Samsung Washer",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Washer.groovy",
+      "required": false,
+      "version": "0.7.0"
+    },
+    {
+      "id": "1b4d9399-7d61-4299-883b-baba14aa8f7a",
+      "name": "SAS - Samsung Water Purifier",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Samsung%20Appliance%20Service/Drivers/SAS%20-%20Samsung%20Water%20Purifier.groovy",
+      "required": false,
+      "version": "0.7.0"
+    }
+  ]
+}

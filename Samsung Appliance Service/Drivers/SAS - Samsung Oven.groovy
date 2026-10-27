@@ -27,8 +27,17 @@
  *  rules carry over. Lower-oven names start with "lowerOven" so they are
  *  easy to find, since both ovens now share one device.
  *
- *  Version: 0.6.1
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - Temperatures and setpoints are converted to the hub's scale, and setpoint commands convert back.
+ *    - start and startLowerOven stop, rather than start the oven, when the mode is not offered or the time can't be read.
+ *    - Cooking helpers moved to the library, shared with the other oven driver.
+ *    - lampOn and lampOff, as on the range.
+ *    - setSelectOption, for any select; the lower oven's scope is learned from its selects too.
+ *    - Setpoints are refused, not sent unconverted, until the appliance has reported its unit.
  */
 
 metadata {
@@ -101,12 +110,17 @@ metadata {
 
         command "setFastPreheat", [[name: "Fast preheat*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setLamp", [[name: "Lamp*", type: "ENUM", constraints: ["Off", "On"]]]
+        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
+                                    [name: "Option*", type: "STRING"]]
+        command "lampOn"
+        command "lampOff"
     }
 
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -136,13 +150,16 @@ Map attrRenames() {
     ]
 }
 
-void installed() { log.info "${device.displayName} installed" }
-void updated() { log.info "${device.displayName} updated" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}, scope=${e.scope}) = ${e.state}"
+    beginEntity(e)
+    // Before the select branch: a lower-oven select is often the first
+    // entity of that cavity to arrive.
+    if (e.scope != "main") ovenNoteCavity((String) e.scope)
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
         emitSelect(e, e.scope == "main" ? "" : "lowerOven")
@@ -151,7 +168,6 @@ void parseEntity(Map e) {
 
     // Second oven cavity -> lowerOven* attributes.
     if (e.scope != "main") {
-        cavityScope((String) e.scope)
         // The divider flag: LocalThings' "Divider" sensor (almulder fork), or
         // on stock LocalThings the same reading as the diagnostic "Cloud
         // connected", which emitGeneric would otherwise hide.
@@ -173,25 +189,16 @@ void parseEntity(Map e) {
             return
         case "temperature":
             if (isNullState(e.state)) return
-            Map unit = [unit: "°${location.temperatureScale}"]
-            emit("temperature", coerce(e.state), unit)       // TemperatureMeasurement
-            emit("ovenTemperature", coerce(e.state), unit)   // Replica
+            emitTemperature("temperature", e)        // TemperatureMeasurement
+            emitTemperature("ovenTemperature", e)    // Replica
+            return
+        case "setpoint":
+            emitTemperature("setpoint", e)
             return
         default:
             emitGeneric(e)
     }
 }
-
-/**
- * The listener names a subdevice's scope after it ("subdevice1" on the range).
- * Remembered rather than assumed, so commands reach whatever this oven's
- * second cavity is called.
- */
-private void cavityScope(String scope) {
-    if (state.cavityScope != scope) state.cavityScope = scope
-}
-
-private String sub() { return (state.cavityScope ?: "subdevice1") as String }
 
 // --- upper / whole oven -----------------------------------------------------
 
@@ -200,67 +207,47 @@ void off() { haTurnOff("power") }
 
 /** Replica's start(mode, time, setpoint); every argument is optional. */
 void start(String mode = null, String time = null, BigDecimal setpoint = null) {
-    startCook("main", mode, time, setpoint)
+    ovenStartCook("main", mode, time, setpoint)
 }
 
 void stop() { haPress("stop") }
 
-void setOvenSetpoint(BigDecimal t) { haSetNumber("setpoint", t) }
+void setOvenSetpoint(BigDecimal t) { haSetTemperature("setpoint", t) }
 void setOvenMode(String v)         { setSelectOption("cooking_mode", v) }
-void setOperationTime(String t)    { setCookMinutes("main", t) }
+void setOperationTime(String t)    { ovenSetCookMinutes("main", t) }
 
 // --- lower oven --------------------------------------------------------------
 
 void startLowerOven(String mode = null, String time = null, BigDecimal setpoint = null) {
-    if (!cavityInstalled("startLowerOven")) return
-    startCook(sub(), mode, time, setpoint)
+    if (!ovenCavityReady("startLowerOven")) return
+    ovenStartCook(ovenCavityScope(), mode, time, setpoint)
 }
 
 void stopLowerOven() {
-    if (!cavityInstalled("stopLowerOven")) return
-    haPress("stop", sub())
+    if (!ovenCavityReady("stopLowerOven")) return
+    haPress("stop", ovenCavityScope())
 }
 
 void setLowerOvenSetpoint(BigDecimal t) {
-    if (!cavityInstalled("setLowerOvenSetpoint")) return
-    haSetNumber("setpoint", t, sub())
+    if (!ovenCavityReady("setLowerOvenSetpoint")) return
+    haSetTemperature("setpoint", t, ovenCavityScope())
 }
 
 void setLowerOvenMode(String v) {
-    if (!cavityInstalled("setLowerOvenMode")) return
-    setSelectOption("cooking_mode", v, sub())
+    if (!ovenCavityReady("setLowerOvenMode")) return
+    setSelectOption("cooking_mode", v, ovenCavityScope())
 }
 
 void setLowerOvenOperationTime(String t) {
-    if (!cavityInstalled("setLowerOvenOperationTime")) return
-    setCookMinutes(sub(), t)
-}
-
-/** Replica refused cavity commands unless ovenCavityStatus was "on". */
-private boolean cavityInstalled(String what) {
-    if (device.currentValue("ovenCavityStatus") == "off") {
-        log.warn "${device.displayName}: ${what} ignored -- the divider is out " +
-                 "(ovenCavityStatus: off), so there is no lower oven"
-        return false
-    }
-    return true
-}
-
-private void startCook(String scope, String mode, String time, BigDecimal setpoint) {
-    if (mode) setSelectOption("cooking_mode", mode, scope)
-    if (time) setCookMinutes(scope, time)
-    if (setpoint != null) haSetNumber("setpoint", setpoint, scope)
-    haPress("start_cooking", scope)
-}
-
-private void setCookMinutes(String scope, String time) {
-    Integer mins = replicaTimeToMinutes(time)
-    if (mins != null) haSetNumber("cook_time", mins, scope)
+    if (!ovenCavityReady("setLowerOvenOperationTime")) return
+    ovenSetCookMinutes(ovenCavityScope(), t)
 }
 
 // --- settings -----------------------------------------------------------
 
 void setFastPreheat(String v) { setSwitchOption("fast_preheat", v) }
 void setLamp(String v) { setSwitchOption("lamp", v) }
+void lampOn()  { haTurnOn("lamp") }
+void lampOff() { haTurnOff("lamp") }
 
 void refresh() { haRefreshAll() }
