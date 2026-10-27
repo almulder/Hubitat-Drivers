@@ -30,8 +30,8 @@
  * instead - no separate configuration needed here, it follows whatever mode is
  * set in the InvisHome app. Use the "Push" command to manually fire a test event.
  *
- * SENSORS: illuminance (and temperature/humidity, if the unit reports them) use the
- * standard capability attributes. Air quality, motion, occupancy, distance, etc. are
+ * SENSORS: the Aura's only sensor is illuminance (lux), via the standard capability
+ * attribute. Temperature, humidity, air quality, motion, occupancy, distance, etc. are
  * Pro-only and won't appear here since the Aura's hardware doesn't have those sensors.
  *
  * LOGGING: outlet on/off changes and button presses always log at info level.
@@ -51,8 +51,7 @@
  * 2.1.0 - Code-audit fixes: removed the Pro-only capabilities and attributes the Aura has
  * no hardware for (motion, presence, AQI, CO2, distance, air pressure, VOC) - they only
  * ever showed as empty in Rule Machine and dashboards. Temperature and humidity are
- * kept: model detection deliberately doesn't treat them as Pro-only, so the Aura may
- * report them. Added
+ * removed too (the Aura's only sensor is illuminance). Added
  * the Switch capability (on()/off() and the "switch" attribute follow the light).
  * markPending() now only stamps the outlet/light attributes (whose declared values now
  * include "pending"). Outlet/light info logging only fires on an actual change.
@@ -67,8 +66,6 @@ metadata {
         capability "SwitchLevel"
         capability "ColorControl"
         capability "ColorTemperature"
-        capability "TemperatureMeasurement"
-        capability "RelativeHumidityMeasurement"
         capability "IlluminanceMeasurement"
         capability "PushableButton"
         capability "Refresh"
@@ -210,10 +207,9 @@ def updateEntity(String attrName, String platform, deviceClass, value, unit = nu
         case "sensor":
             switch (deviceClass) {
                 case "temperature":
-                    sendEvent(name: "temperature", value: value, unit: unit)
-                    break
                 case "humidity":
-                    sendEvent(name: "humidity", value: value, unit: unit)
+                    // Not on Aura hardware (illuminance is its only sensor) - ignore.
+                    if (logEnable) log.debug "${device.displayName}: ignoring ${deviceClass} reading"
                     break
                 case "illuminance":
                     sendEvent(name: "illuminance", value: value, unit: unit)
