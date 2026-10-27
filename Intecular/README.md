@@ -83,7 +83,7 @@ No cloud, no vendor bridge box - InvisOutlet publishes standard Home Assistant M
 
 ### 2) Add the App
 
-- Apps → **Add User App** → **InvisOutlet Device Service**
+- **Integrations** → **Add User App** → **InvisOutlet Device Service** (hub firmware 2.5.0+; on older firmware use Apps → Add User App)
 
 ### 3) About / disclaimer page
 

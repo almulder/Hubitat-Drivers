@@ -12,7 +12,9 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expressed or implied. 
  * 
- * 1.3.0 - Audit fixes: device-token refresh now updates the driver (was throwing on sensors) and no longer loops;
+ * 1.3.0 - The app now appears under Integrations in the Hubitat sidebar instead of Apps (platform 2.5.0+;
+ *         older firmware keeps it under Apps).
+ *         Audit fixes: device-token refresh now updates the driver (was throwing on sensors) and no longer loops;
  *         access token refreshed before expiry and on HTTP 401; battery 0 reports 0% (was -1%) and a missing
  *         battery reading no longer reports 0%; scheduled reconciles no longer skipped by a few ms of drift;
  *         hub-offline errors handled on the setup pages; unsupported device types reported in diagnostics;
@@ -42,7 +44,8 @@ definition(
     author: "Albert Mulder",
     description: "Connects your YoLink devices to Hubitat.",
     oauth: false,    
-    category: "YoLink",
+    category: "Integrations",
+    menu: "Integrations",    // places the app under the sidebar's Integrations section (platform 2.5.0+; older hubs keep it under Apps)
     singleInstance: true,
     iconUrl: "${getImagePath()}yolink.png",
     iconX2Url: "${getImagePath()}yolink.png",

@@ -213,6 +213,8 @@
  *          exists anymore, so keeping their changelog text around would only mislead
  *          anyone reading this history looking for how the current code actually works.
  *  2.1.0 - Code-audit fixes (requires Listener 2.1.0+ and Pro/Aura 2.1.0+):
+ *          - The app now appears under Integrations in the Hubitat sidebar instead of
+ *            Apps (menu: "Integrations", platform 2.5.0+; older firmware keeps it under Apps).
  *          - The update queue now lives in memory (a ConcurrentHashMap keyed by
  *            dni+attribute) instead of state. Reading and rewriting the whole queue map
  *            from two threads at once (the Listener's parse thread and the pump) could
@@ -279,7 +281,8 @@ definition(
     namespace: "almulder",
     author: "Albert Mulder",
     description: "Connects your InvisOutlet Aura/Pro devices to Hubitat via MQTT.",
-    category: "InvisOutlet",
+    category: "Integrations",
+    menu: "Integrations",    // places the app under the sidebar's Integrations section (platform 2.5.0+; older hubs keep it under Apps)
     iconUrl: "",
     iconX2Url: "",
     singleInstance: true,

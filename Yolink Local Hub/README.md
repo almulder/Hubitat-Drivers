@@ -76,7 +76,7 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 - Or install everything with **Hubitat Package Manager** (search for *YoLink Local Hub*).
 
 ### 2) Add the App
-- Apps → **Add User App** → **YoLink Device Local Service**
+- **Integrations** → **Add User App** → **YoLink Device Local Service** (hub firmware 2.5.0+; on older firmware use Apps → Add User App)
 
 ### 3) Enter credentials
 - **Local Hub IP** (reserved/static)
