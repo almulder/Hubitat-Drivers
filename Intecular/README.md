@@ -15,12 +15,13 @@ No cloud, no vendor bridge box - InvisOutlet publishes standard Home Assistant M
 - **One real Hubitat device per physical outlet** - not a maze of child devices, everything (both outlets, the nightlight/color light, sensors, buttons) lives on a single device
 - **Automatic Aura vs. Pro detection** - the app creates the correct driver type for each unit automatically based on what it discovers
 - **Independent control of both outlets** - `outlet1On/Off()` and `outlet2On/Off()`, named by position rather than "top/bottom" so it's correct even if the unit is mounted upside down
+- **Standard Switch/SwitchLevel for the light** - `on()`/`off()`/`setLevel()` control the nightlight (Pro) or color light (Aura) only, never the outlets; `setLevel(0)` turns it off
 - **Touch button support** - physical button presses show up as standard Hubitat button events (`pushed` 1/2), ready for Rule Machine or Button Controller
 - **Full sensor support (Pro)**: temperature, humidity, illuminance, motion, occupancy/presence, distance, Air Quality Index, CO2, Air Pressure, VOC
 - **Color support (Aura)**: hue/saturation and color temperature via the standard `ColorControl`/`ColorTemperature` capabilities
 - **Selectable units**: Temperature (°F/°C) and Distance (cm/in), applied instantly to already-known readings when changed
 - **webCoRE-visible attributes and commands** - everything is explicitly declared, not just ad-hoc events
-- **De-duplication** for devices/firmware that republish the same state multiple times per action
+- **De-duplication and rate limiting** - the units republish their telemetry about once a second; only real changes are passed on, and a reading that arrives too soon after the last one is held and delivered a few seconds later rather than dropped
 - **Built-in setup guides** for standing up an MQTT broker if you don't already have one (Raspberry Pi, or Hubitat's own built-in broker)
 
 **Initial device support**
@@ -100,13 +101,13 @@ No cloud, no vendor bridge box - InvisOutlet publishes standard Home Assistant M
 
 ### 6) Select devices
 
-- The app polls the broker briefly and shows every InvisOutlet unit it finds, labeled by name and detected model (Aura/Pro), with an online/offline indicator.
+- The app polls the broker briefly, briefly flashes each unit's nightlight to confirm it's really there, and lists every InvisOutlet unit that answered, labeled by name and detected model (Aura/Pro). New units that don't answer are hidden; units you've already added are always listed (marked NO RESPONSE if they didn't answer), so they're never removed just because they were offline during setup.
 - Choose which units to expose. The app creates one device per unit and a hidden MQTT Listener device.
 
 ### 7) Done
 
 - Open a created device and watch events arrive.
-- Optional: enable debug logging on the Listener device while testing.
+- Optional: enable debug logging on the Listener device while testing (off by default; it and raw-traffic logging turn themselves off after 30 minutes).
 
 ---
 

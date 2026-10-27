@@ -2,10 +2,10 @@
   "packageName": "INTECULAR™ InvisOutlet MQTT Connector",
   "author": "Albert Mulder",
   "minimumHEVersion": "2.2.9",
-  "dateReleased": "2026-07-27",
+  "dateReleased": "2026-10-26",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Intecular",
   "communityLink": "https://community.hubitat.com/t/intecular-invisoutlet-hubitat-mqtt-app-drivers-beta/165173",
-  "releaseNotes": "2.0.3 (MQTT Listener) - Finally Fixed 'excessive hub load' errors on Aura/Pro units caused by rapid sensor republishing. Added throttling to motion/occupancy and numeric sensor updates (temperature, humidity, illuminance, distance, AQI, CO2, air pressure, VOC). No re-pairing needed.\n",
+  "releaseNotes": "2.1.0 (all components) - Code-audit fixes. Listener: motion/occupancy no longer get stuck active, the last reading of a burst is no longer dropped, and per-message bookkeeping moved out of state (much lower hub load); brightness/color updates are rate-limited too; reconnects back off; the broker password is no longer stored in device state; probing restores the nightlight. App: fixed the update queue stalling and losing updates; re-running setup no longer stamps 'pending' on existing devices or deletes existing devices that didn't answer the probe. Pro/Aura: added the Switch capability - on/off controls the nightlight/color light (never the outlets), so these devices now also appear as switches in switch pickers, groups and voice assistants; Aura no longer lists Pro-only sensors (motion, presence, air quality, distance). Debug logging left on by older versions turns itself off 30 minutes after the update. No re-pairing needed.\n2.0.3 (MQTT Listener) - Fixed unbounded state growth from tracking topics of non-InvisOutlet devices on a shared broker.\n",
    "tags": [
     "MQTT",
     "Misc. Devices"
@@ -14,38 +14,38 @@
     {
       "id": "5c357bbf-617f-48ad-95c5-848081080c02",
       "name": "InvisOutlet Device Service",
-      "namespace": "Almulder",
+      "namespace": "almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/App/InvisOutlet%20Device%20Service.groovy",
       "required": true,
       "oauth": false,
       "primary": true,
-      "version": "2.0.0"
+      "version": "2.1.0"
     }
   ],
   "drivers": [
     {
       "id": "baba79ba-7603-4699-a93e-cfb388535428",
       "name": "InvisOutlet MQTT Listener",
-      "namespace": "Almulder",
+      "namespace": "almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20MQTT%20Listener.groovy",
       "required": true,
-      "version": "2.0.3"
+      "version": "2.1.0"
     },
     {
       "id": "aebb1b09-f739-4705-88d8-569cca1d0480",
       "name": "InvisOutlet Pro",
-      "namespace": "Almulder",
+      "namespace": "almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20Pro.groovy",
       "required": false,
-      "version": "2.0.0"
+      "version": "2.1.0"
     },
     {
       "id": "5f837480-eb6b-43b3-80d6-4b8ef2fafae1",
       "name": "InvisOutlet Aura",
-      "namespace": "Almulder",
+      "namespace": "almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Drivers/InvisOutlet%20Aura.groovy",
       "required": false,
-      "version": "2.0.0"
+      "version": "2.1.0"
     }
   ]
 }
