@@ -31,6 +31,15 @@
         "Notifications",
         "Tools & Utilities"
       ]
+    },
+    {
+      "name": "SAS - Samsung Appliance Service",
+      "category": "Integrations",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/hpm/samsung-appliance-service.json",
+      "description": "Samsung appliances in Hubitat via Home Assistant + LocalThings, one device per appliance. App, Listener and shared library required; appliance drivers optional/selectable.",
+      "tags": [
+        "Misc. Devices"
+      ]
     }
   ]
 }
