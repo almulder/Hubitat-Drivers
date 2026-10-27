@@ -78,7 +78,7 @@ without it.
 2. **Drivers code** → *New Driver* → paste `Drivers/SAS - Samsung Appliance Listener.groovy`
 3. **Drivers code** → paste each `Drivers/SAS - Samsung <appliance>.groovy` you need
 4. **Apps code** → *New App* → paste `App/SAS - Samsung Appliance Service.groovy`
-5. **Integrations** → *Add User App* → **SAS - Samsung Appliance Service**
+5. **Integrations** → *Add user integration* → **SAS - Samsung Appliance Service**
 
 Then enter your Home Assistant IP, port and token, press **Test connection**,
 open **Find and select appliances**, tick the ones you want, and press Done.
