@@ -2,10 +2,10 @@
   "packageName": "Restock Manager",
   "author": "Albert Mulder",
   "minimumHEVersion": "2.2.9",
-  "dateReleased": "2026-10-19",
+  "dateReleased": "2026-10-26",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Restock%20Manager",
   "communityLink": "https://community.hubitat.com/t/beta-restock-manager-get-notified-when-products-are-back-in-stock-or-any-web-page-changes/166909",
-  "releaseNotes": "0.1.0 - Initial release: watch store products (stock & price) or any web page (text appears/disappears), per-item notifications and messages, verify-and-autofill, price-drop alerts, daily and per-item in-stock reminders.",
+  "releaseNotes": "0.1.1 - Fixed a repeat in-stock alert after the first Done on a new item and repeated alerts when a notification device fails; 'possibly in stock' is now opt-in; an unreadable price no longer counts as under your max; better variant, SKU, price and entity parsing; the test button no longer turns on switches; debug logging defaults off with 30-minute auto-off; large lists always fit the polling interval; the daily run no longer doubles up with the regular check; in stock with an unreadable price neither alerts nor resets; stable variant choice; 1.299 and 1 299,00 read as thousands. UPGRADING: re-check max prices auto-filled from decimal-comma prices (e.g. 1.299 from 1.299,00); 'possibly in stock' no longer alerts unless turned on per item; open the main app and press Done once.\n0.1.0 - Initial release: watch store products (stock & price) or any web page (text appears/disappears), per-item notifications and messages, verify-and-autofill, price-drop alerts, daily and per-item in-stock reminders.",
   "tags": [
     "Notifications",
     "Tools & Utilities"
@@ -19,7 +19,7 @@
       "required": true,
       "oauth": false,
       "primary": true,
-      "version": "0.1.0"
+      "version": "0.1.1"
     },
     {
       "id": "eecc4355-7007-498b-b6a1-dd56577725ed",
@@ -29,7 +29,7 @@
       "required": true,
       "oauth": false,
       "primary": false,
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
