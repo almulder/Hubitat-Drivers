@@ -8,8 +8,15 @@
  *  Attribute names follow the HubiThings Replica Samsung Dryer driver so
  *  Rule Machine rules carry over; see attrRenames().
  *
- *  Version: 0.6.1
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - setCycle, setDryLevel, setWrinklePrevent and setSelectOption, for any other select.
+ *    - energy is in kWh, Hubitat's EnergyMeter unit; LocalThings' Wh is converted.
+ *    - A subdevice entity lands on its own subdevice1-prefixed attribute instead of overwriting the main one.
+ *    - setDelayStart, as on the dishwasher.
  */
 
 metadata {
@@ -44,12 +51,19 @@ metadata {
         command "start"
         command "stop"
         command "pause"
+        command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
+        command "setDryLevel", [[name: "Dry level*", type: "STRING", description: "See the 'Dry Level' state variable for this appliance's options"]]
+        command "setWrinklePrevent", [[name: "Wrinkle prevent*", type: "ENUM", constraints: ["Off", "On"]]]
+        command "setDelayStart", [[name: "Hours*", type: "NUMBER"]]
+        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
+                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -71,13 +85,26 @@ Map attrRenames() {
     ]
 }
 
-void installed() { log.info "${device.displayName} installed" }
-void updated() { log.info "${device.displayName} updated" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}) = ${e.state}"
+    beginEntity(e)
+
+    // A subdevice reading gets its scope as a prefix, so it can never
+    // overwrite the main attribute of the same name.
+    String scope = scopePrefix(e)
+    if (scope) {
+        if (e.domain == "select") {
+            rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
+            emitSelect(e, scope)
+        } else {
+            emitGeneric(e, scope)
+        }
+        return
+    }
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
         emitSelect(e, "")
@@ -86,7 +113,7 @@ void parseEntity(Map e) {
 
     switch (e.suffix) {
         case "energy":
-            if (!isNullState(e.state)) emit("energy", coerce(e.state), [unit: e.unit ?: "Wh"])
+            emitEnergy("energy", e)
             return
         default:
             emitGeneric(e)
@@ -96,6 +123,17 @@ void parseEntity(Map e) {
 void start() { haPress("start") }
 void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
+
+void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
+
+void setCycle(String v)    { setSelectOption("cycle", v) }
+void setDryLevel(String v) { setSelectOption("dry_level", v) }
+
+/** A switch on most boards; a select where the board offers more than off and on. */
+void setWrinklePrevent(String v) {
+    if (optionsFor("wrinkle_prevent")) setSelectOption("wrinkle_prevent", v)
+    else setSwitchOption("wrinkle_prevent", v)
+}
 
 // --- settings -----------------------------------------------------------
 

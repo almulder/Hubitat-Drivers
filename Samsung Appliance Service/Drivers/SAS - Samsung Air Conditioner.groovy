@@ -12,12 +12,25 @@
  *  the right cycles and names on whatever board it meets. An entity upstream
  *  adds later still appears, named from its suffix, via emitGeneric.
  *
- *  NOT YET SUPPORTED: this type also exposes climate entities (climate).
- *  Their state is reported as a plain attribute, but setting them needs
- *  climate/water_heater service helpers the library does not have yet.
+ *  The climate entity is the unit itself: its HVAC mode is climateMode, and
+ *  switch is on unless that mode is off. on, off and setClimateMode drive
+ *  it. NOT YET SUPPORTED: climate setpoints and fan modes.
  *
- *  Version: 0.6.1
+ *  temperature is the room: currentTemperatureC, converted to the hub's
+ *  scale. The outdoor reading is outdoorTemperature.
+ *
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - Subdevice selects are named like every other subdevice reading,
+ *      e.g. subdevice1CookingMode, no longer Subdevice1CookingMode.
+ *    - temperature is the room reading, converted to the hub's scale; the outdoor reading moved to outdoorTemperature.
+ *    - Switch, on, off and setClimateMode drive the climate entity; its mode is climateMode.
+ *    - RelativeHumidityMeasurement, and CarbonDioxideMeasurement as carbonDioxide.
+ *    - Select command descriptions point at the state variable listing the options.
+ *    - on and off use the HVAC mode, which every climate entity accepts; on restores the last mode.
  */
 
 metadata {
@@ -26,6 +39,9 @@ metadata {
         capability "Sensor"
         capability "Refresh"
         capability "TemperatureMeasurement"
+        capability "RelativeHumidityMeasurement"
+        capability "CarbonDioxideMeasurement"
+        capability "Switch"
 
         attribute "autoCleanRunning",            "string"   // diagnostic
         attribute "currentLimitEnabled",         "string"   // diagnostic
@@ -70,7 +86,6 @@ metadata {
         attribute "filterTime",                  "number"
         attribute "hepaFilterStatus",            "string"   // diagnostic
         attribute "hepaFilterUsage",             "number"   // diagnostic
-        attribute "humidity",                    "number"
         attribute "lastAirSensingLevel",         "number"   // diagnostic
         attribute "lastAirSensingTime",          "number"   // diagnostic
         attribute "motionDetectWindMode",        "string"   // diagnostic
@@ -101,6 +116,8 @@ metadata {
         attribute "windsleep",                   "string"
         attribute "sensingSkipEnd",              "string"
         attribute "sensingSkipStart",            "string"
+        attribute "climateMode",                 "string"
+        attribute "outdoorTemperature",          "number"
         attribute "healthStatus", "string"
         attribute "lastUpdate",   "string"
 
@@ -126,11 +143,11 @@ metadata {
         command "setVentilationAlarm", [[name: "Ventilation alarm*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setWindfree", [[name: "Windfree*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setWindsleep", [[name: "Windsleep*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setAirFilterPm1Threshold", [[name: "Air filter pm1 threshold*", type: "STRING", description: "Name or raw code; the dropdown is under Preferences"]]
-        command "setAirFilterThreshold", [[name: "Air filter threshold*", type: "STRING", description: "Name or raw code; the dropdown is under Preferences"]]
+        command "setAirFilterPm1Threshold", [[name: "Air filter pm1 threshold*", type: "STRING", description: "See the 'Air Filter Pm1 Threshold' state variable for this appliance's options"]]
+        command "setAirFilterThreshold", [[name: "Air filter threshold*", type: "STRING", description: "See the 'Air Filter Threshold' state variable for this appliance's options"]]
         command "setEdgeLightingColor", [[name: "Edge lighting color*", type: "STRING", description: "See the 'Edge Lighting Color' state variable for this appliance's options"]]
         command "setEdgeLightingMode", [[name: "Edge lighting mode*", type: "STRING", description: "See the 'Edge Lighting Mode' state variable for this appliance's options"]]
-        command "setEnergySavingMode", [[name: "Energy saving mode*", type: "STRING", description: "Name or raw code; the dropdown is under Preferences"]]
+        command "setEnergySavingMode", [[name: "Energy saving mode*", type: "STRING", description: "See the 'Energy Saving Mode' state variable for this appliance's options"]]
         command "setFilterAlarmTime", [[name: "Filter alarm time*", type: "STRING", description: "See the 'Filter Alarm Time' state variable for this appliance's options"]]
         command "setIndicatorLightMode", [[name: "Indicator light mode*", type: "STRING", description: "See the 'Indicator Light Mode' state variable for this appliance's options"]]
         command "setSensingMode", [[name: "Sensing mode*", type: "STRING", description: "See the 'Sensing Mode' state variable for this appliance's options"]]
@@ -142,6 +159,7 @@ metadata {
         command "setTropicalNightMode", [[name: "Tropical night mode*", type: "NUMBER"]]
         command "setSensingSkipEnd", [[name: "Sensing skip end* (HH:MM:SS)", type: "STRING"]]
         command "setSensingSkipStart", [[name: "Sensing skip start* (HH:MM:SS)", type: "STRING"]]
+        command "setClimateMode", [[name: "Mode*", type: "STRING", description: "An HVAC mode the unit offers, e.g. off, cool, heat, dry, fan_only, auto"]]
         command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
                                     [name: "Option*", type: "STRING"]]
     }
@@ -149,7 +167,8 @@ metadata {
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -159,37 +178,87 @@ metadata {
 /** Library hook: no HubiThings Replica driver to match for this type. */
 Map attrRenames() { return [:] }
 
-void installed() { log.info "${device.displayName} installed" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
 
-void updated() { log.info "${device.displayName} updated" }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}, scope=${e.scope}) = ${e.state}"
+    beginEntity(e)
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
-        emitSelect(e, e.scope == "main" ? "" : cap(e.scope as String))
+        emitSelect(e, scopePrefix(e))
         return
     }
     if (e.scope != "main") {
-        emitGeneric(e, e.scope as String)
+        emitGeneric(e, scopePrefix(e))
+        return
+    }
+
+    // The unit itself: its state is the HVAC mode. Usually named for the
+    // device, so its suffix is empty, but whichever climate entity the
+    // commands drive is the one reported.
+    if (e.domain == "climate" && (String) e.suffix == suffixInDomain("climate")) {
+        if (isNullState(e.state)) return
+        String mode = e.state.toString()
+        emit("climateMode", mode)
+        emit("switch", mode == "off" ? "off" : "on")
+        if (mode != "off" && state.lastClimateMode != mode) state.lastClimateMode = mode
         return
     }
 
     switch (e.suffix) {
-        case "outdoor_temperature":
+        // The room reading drives temperature; currentTemperatureC keeps its
+        // Celsius name and value.
+        case "current_temperature_c":
             if (isNullState(e.state)) return
-            emit("temperature", coerce(e.state), [unit: "°${location.temperatureScale}"])
+            def c = coerce(e.state)
+            if (c instanceof Number && tempScaleOf(e.unit) == "F") {
+                c = new BigDecimal((((Number) c).doubleValue() - 32.0d) * 5.0d / 9.0d).setScale(1, BigDecimal.ROUND_HALF_UP)
+            }
+            emit("currentTemperatureC", c, [unit: "°C"])
+            emitTemperature("temperature", e)
+            return
+        case "outdoor_temperature":
+            emitTemperature("outdoorTemperature", e)
+            return
+        case "co2":
+            emitCarbonDioxide(e)
             return
         default:
             emitGeneric(e)
     }
 }
 
-private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : s }
-
 // --- commands ---------------------------------------------------------------
+
+/**
+ * set_hvac_mode works on every climate entity; turn_on and turn_off only on
+ * those that declare them. So off is the "off" mode, and on goes back to the
+ * last mode the unit ran in, using turn_on only when none is known yet.
+ */
+void on() {
+    String last = state.lastClimateMode as String
+    if (last) climateService("set_hvac_mode", [hvac_mode: last])
+    else      climateService("turn_on")
+}
+void off() { climateService("set_hvac_mode", [hvac_mode: "off"]) }
+
+void setClimateMode(String mode) {
+    String m = mode?.trim()?.toLowerCase()
+    if (!m) return
+    climateService("set_hvac_mode", [hvac_mode: m])
+}
+
+private void climateService(String service, Map data = [:]) {
+    String s = suffixInDomain("climate")
+    if (s == null) {
+        log.warn "${device.displayName}: no climate entity known; cannot call climate.${service}"
+        return
+    }
+    haService("climate", service, s, data)
+}
 
 void autoCleanStop() { haPress("auto_clean_stop") }
 void filterTimeReset() { haPress("filter_time_reset") }

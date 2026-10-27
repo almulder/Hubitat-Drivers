@@ -41,7 +41,7 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 
 ## How it works
 
-1. **Parent App** (`YoLink™ Device Local Service`)
+1. **Parent App** (`YoLink Device Local Service`)
    - Stores your Local Hub **IP**, **Subnet (Net ID)**, **Client ID**, and **Client Secret**
    - Requests a **local access token**, discovers devices, lets you **select which to expose**
    - Creates one **MQTT Listener** device that subscribes to `ylsubnet/<NetID>/+/report` and routes messages by `deviceId`
@@ -72,10 +72,11 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 
 ### 1) Install code in Hubitat
 - **Apps Code** → add the parent app from this folder → Save.
-- **Drivers Code** → add drivers you need (THSensor, Leak Sensor, Door Sensor, PFA, MQTT Listener) → Save.
+- **Drivers Code** → add the **MQTT Listener** driver (required) plus the drivers you need (THSensor, Leak Sensor, Door Sensor, Motion Sensor, PFA) → Save.
+- Or install everything with **Hubitat Package Manager** (search for *YoLink Local Hub*).
 
 ### 2) Add the App
-- Apps → **Add User App** → **YoLink™ Device Local Service**
+- **Integrations** → **Add user integration** → **YoLink Device Local Service** (hub firmware 2.5.0+; on older firmware use Apps → Add User App)
 
 ### 3) Enter credentials
 - **Local Hub IP** (reserved/static)
@@ -95,12 +96,14 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 
 ### 6) Done
 - Open a created device and watch events arrive.
-- Optional: enable **debug logging** in the app or driver while testing.
+- Optional: enable **debug logging** in the app or driver while testing. It turns itself off after 30 minutes.
 
 ---
 
 ## Updating / Migration notes
 
+- **After every update, open the app and click through to Done.** This re-runs device setup (and, coming from
+  versions before 1.3.0, removes old credentials that earlier builds stored in device state).
 - Children now use the **YoLink `deviceId` as the DNI** (for reliable MQTT routing).  
   If you’re coming from older builds, the app will recreate devices with the new DNI automatically.
 
@@ -111,8 +114,12 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 - **MQTT connected?**  
   Open the **MQTT Listener** device. You should see `MQTT: connected` and live log entries.
 
-- **“Unable to locate target device … for MQTT”**  
-  The app **ignores events** for devices you did not create (no errors, only a debug line if debugging is on).
+- **“MQTT received for selected device …, but child device not found”**  
+  The device is selected in the app but its Hubitat device is missing. Re-open the app and click through to **Done** to recreate it.
+  Events for devices you did **not** select are ignored (only a debug line if debugging is on).
+
+- **A device type failed to create**  
+  The Diagnostics page lists any selected device whose driver is not installed. Only the device types listed above have published drivers.
 
 - **No updates?**  
   - Verify Local Hub IP and that the hub is reachable on the LAN.  

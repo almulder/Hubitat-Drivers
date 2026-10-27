@@ -12,8 +12,15 @@
  *  the right cycles and names on whatever board it meets. An entity upstream
  *  adds later still appears, named from its suffix, via emitGeneric.
  *
- *  Version: 0.5.0
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - Subdevice selects are named like every other subdevice reading,
+ *      e.g. subdevice1CookingMode, no longer Subdevice1CookingMode.
+ *    - RelativeHumidityMeasurement.
+ *    - Select command descriptions point at the state variable listing the options.
  */
 
 metadata {
@@ -21,6 +28,7 @@ metadata {
         capability "Actuator"
         capability "Sensor"
         capability "Refresh"
+        capability "RelativeHumidityMeasurement"
 
         attribute "autoCleanRunning",         "string"   // diagnostic
         attribute "targetHumidity",           "number"
@@ -32,7 +40,6 @@ metadata {
         attribute "airFilterUsage",           "number"   // diagnostic
         attribute "airFilterUsageHours",      "number"   // diagnostic
         attribute "autoCleanProgress",        "string"   // diagnostic
-        attribute "humidity",                 "number"
         attribute "watertankFullAlarmStatus", "string"   // diagnostic
         attribute "autoClean",                "string"
         attribute "display",                  "string"
@@ -45,9 +52,9 @@ metadata {
         command "setDisplay", [[name: "Display*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setMuteOnce", [[name: "Mute once*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setWatertankLight", [[name: "Watertank light*", type: "ENUM", constraints: ["Off", "On"]]]
-        command "setAirFilterThreshold", [[name: "Air filter threshold*", type: "STRING", description: "Name or raw code; the dropdown is under Preferences"]]
-        command "setOperatingMode", [[name: "Operating mode*", type: "STRING", description: "Name or raw code; the dropdown is under Preferences"]]
-        command "setWatertankLightBrightness", [[name: "Watertank light brightness*", type: "STRING", description: "Name or raw code; the dropdown is under Preferences"]]
+        command "setAirFilterThreshold", [[name: "Air filter threshold*", type: "STRING", description: "See the 'Air Filter Threshold' state variable for this appliance's options"]]
+        command "setOperatingMode", [[name: "Operating mode*", type: "STRING", description: "See the 'Operating Mode' state variable for this appliance's options"]]
+        command "setWatertankLightBrightness", [[name: "Watertank light brightness*", type: "STRING", description: "See the 'Watertank Light Brightness' state variable for this appliance's options"]]
         command "setWatertankLightColor", [[name: "Watertank light color*", type: "STRING", description: "See the 'Watertank Light Color' state variable for this appliance's options"]]
         command "setTargetHumidity", [[name: "Target humidity*", type: "NUMBER"]]
         command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
@@ -57,7 +64,8 @@ metadata {
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -67,21 +75,21 @@ metadata {
 /** Library hook: no HubiThings Replica driver to match for this type. */
 Map attrRenames() { return [:] }
 
-void installed() { log.info "${device.displayName} installed" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
 
-void updated() { log.info "${device.displayName} updated" }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}, scope=${e.scope}) = ${e.state}"
+    beginEntity(e)
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
-        emitSelect(e, e.scope == "main" ? "" : cap(e.scope as String))
+        emitSelect(e, scopePrefix(e))
         return
     }
     if (e.scope != "main") {
-        emitGeneric(e, e.scope as String)
+        emitGeneric(e, scopePrefix(e))
         return
     }
 
@@ -91,8 +99,6 @@ void parseEntity(Map e) {
             emitGeneric(e)
     }
 }
-
-private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : s }
 
 // --- commands ---------------------------------------------------------------
 

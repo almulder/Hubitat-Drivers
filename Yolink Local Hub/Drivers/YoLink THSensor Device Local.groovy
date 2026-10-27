@@ -2,6 +2,12 @@
  *  YoLink™ THSensor Device (Local API Edition)
  *  © 2025 Albert Mulder
  *  
+ *  1.2.0 - Audit fixes: temperature correction offset converted as a difference (+1°C = +1.8°F, was 33.8°F);
+ *          missing alarm block no longer writes "null" alarmCode; "mode" attribute declared; battery 0 now
+ *          reports 0% and a message without a battery reading leaves battery unchanged; no forced
+ *          isStateChange events; new device token accepted from the app (setDeviceToken); broker credentials
+ *          no longer stored; no extra poll on app save; debug logging turns itself off after 30 minutes.
+ *          Re-review: fixed an error on every poll introduced by the alarm-block change.
  *  1.1.2 - Updated for HPM
  *  1.1.1 - Harden the beginning of processStateData(String payload) to coerce/guard data and loraInfo before dereferencing.
  *  1.1.0 - Initial working driver
@@ -9,7 +15,7 @@
 
 import groovy.json.JsonSlurper
 
-def clientVersion() { return "1.1.2"}
+def clientVersion() { return "1.2.0"}
 def copyright()     { return "© 2025 Albert Mulder" }
 def bold(t)         { return "<strong>$t</strong>" }
 def driverName()    { return "YoLink™ THSensor (Local API Edition)"}
@@ -24,7 +30,7 @@ preferences {
 						  <b>Temperature Scale:</b> ${activeScale()}<br>
 						  <b>Date/Time Format:</b> ${activeFmt()}<br>
 						  <br>${copyright()}"""
-    input name: "debug", type: "bool", title: "Enable debug logging", defaultValue: false
+    input name: "debug", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
 }
 
 
@@ -48,6 +54,7 @@ metadata {
         attribute "reportAt", "String"
         attribute "stateChangedAt", "String"
         attribute "state", "String"           // "normal" | "alert"
+        attribute "mode", "String"            // device mode, when reported
 
         // Readings
         attribute "temperature", "Number"
@@ -90,15 +97,30 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, loca
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP
-    state.clientId     = clientId
-    state.clientSecret = clientSecret
+    state.remove("clientId")       // broker credentials are only needed by the MQTT Listener
+    state.remove("clientSecret")
     rememberState("devId", devId)
 
     logDebug "ServiceSetup: DNI=${state.my_dni}, Device Id=${state.devId}, HubIP=${state.localHubIP}, TokenSet=${!!state.token}"
-    reset()
+    state.driverVersion = clientVersion()  // keep local only
+    // No poll here: the app runs a reconcile right after setup, which polls every device once
 }
 
 boolean isSetup() { (state.devId && state.token) }
+
+// Called by the app when the Local Hub issues a new device token
+void setDeviceToken(token) {
+    if (token && state.token != token) {
+        state.token = token
+        logDebug("Device token updated")
+    }
+}
+
+void logsOff() {
+    log.warn "${device.displayName}: debug logging disabled"
+    device.updateSetting("debug", [value: "false", type: "bool"])
+    state.debug = false
+}
 
 def installed() {
     state.driverVersion = clientVersion() // keep in state only; do NOT sendEvent
@@ -108,6 +130,7 @@ def installed() {
 def updated() {
     state.debug = (settings?.debug == true)
     state.driverVersion = clientVersion() // keep in state only; do NOT sendEvent
+    if (state.debug) runIn(1800, "logsOff")
 }
 
 def uninstalled() {
@@ -129,8 +152,9 @@ def poll(force = null) {
 def refresh() { poll(true) }
 
 def pollDevice(delay=1) {
+    state.lastPollMs = now()
     runIn((delay ?: 1) as int, "getDevicestate")
-    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone), isStateChange: true)
+    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone))
 }
 
 /* ========================= Local API Interaction ===================== */
@@ -143,6 +167,8 @@ def getDevicestate() {
             token       : state.token
         ]
         def object = parent.pollAPI(request, state.name ?: "THSensor", state.type ?: "THSensor")
+        String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
+        if (latestToken && latestToken != state.token) state.token = latestToken
         if (object) {
             if (successful(object)) {
                 parseDevice(object)
@@ -199,13 +225,13 @@ private void parseDevice(object) {
     // Emit readings in preferred units
     if (tempC != null) {
         def temp = convertCToPreferred(tempC)
-        sendEvent(name: "temperature", value: temp, unit: activeScale(), isStateChange: true)
+        sendEvent(name: "temperature", value: temp, unit: activeScale())
     }
-    if (humidity != null) sendEvent(name: "humidity", value: humidity, unit: "%", isStateChange: true)
+    if (humidity != null) sendEvent(name: "humidity", value: humidity, unit: "%")
     if (batteryPct != null) rememberBatteryState(batteryPct as int, true)
 
-    rememberState("state", stateStr)
-    rememberState("mode", mode)
+    if (stateStr) rememberState("state", stateStr)
+    if (mode) rememberState("mode", mode)
     if (interval != null) rememberState("interval", interval as int)
     if (firmware) rememberState("firmware", firmware)
     if (batteryType) rememberState("batteryType", batteryType)
@@ -216,31 +242,34 @@ private void parseDevice(object) {
     if (tMaxC != null) rememberState("tempLimitMax", convertCToPreferred(tMaxC))
     if (hMin  != null) rememberState("humidityLimitMin", hMin as double)
     if (hMax  != null) rememberState("humidityLimitMax", hMax as double)
-    if (tCorrC!= null) rememberState("tempCorrection", convertCToPreferred(tCorrC))
+    if (tCorrC!= null) rememberState("tempCorrection", convertCDeltaToPreferred(tCorrC))
     if (hCorr != null) rememberState("humidityCorrection", hCorr as double)
 
-    // Alarms
-    Integer aCode = (alarm?.code as Integer)
-    def flags = [
-        lowBattery  : alarm?.lowBattery,
-        lowTemp     : alarm?.lowTemp,
-        highTemp    : alarm?.highTemp,
-        lowHumidity : alarm?.lowHumidity,
-        highHumidity: alarm?.highHumidity,
-        period      : alarm?.period
-    ]
-    rememberState("alarmCode", aCode)
-    rememberState("alarmLowBattery",  toStr(flags.lowBattery))
-    rememberState("alarmLowTemp",     toStr(flags.lowTemp))
-    rememberState("alarmHighTemp",    toStr(flags.highTemp))
-    rememberState("alarmLowHumidity", toStr(flags.lowHumidity))
-    rememberState("alarmHighHumidity",toStr(flags.highHumidity))
-    rememberState("alarmPeriod",      toStr(flags.period))
-    rememberState("alarmSummary", summarizeAlarms(flags))
+    // Alarms (only when the response carried an alarm block)
+    Integer aCode = null   // declared here: the debug line below logs it
+    if (alarm instanceof Map && !alarm.isEmpty()) {
+        aCode = (alarm?.code as Integer)
+        def flags = [
+            lowBattery  : alarm?.lowBattery,
+            lowTemp     : alarm?.lowTemp,
+            highTemp    : alarm?.highTemp,
+            lowHumidity : alarm?.lowHumidity,
+            highHumidity: alarm?.highHumidity,
+            period      : alarm?.period
+        ]
+        if (aCode != null) rememberState("alarmCode", aCode)
+        rememberState("alarmLowBattery",  toStr(flags.lowBattery))
+        rememberState("alarmLowTemp",     toStr(flags.lowTemp))
+        rememberState("alarmHighTemp",    toStr(flags.highTemp))
+        rememberState("alarmLowHumidity", toStr(flags.lowHumidity))
+        rememberState("alarmHighHumidity",toStr(flags.highHumidity))
+        rememberState("alarmPeriod",      toStr(flags.period))
+        rememberState("alarmSummary", summarizeAlarms(flags))
+    }
 
     // LoRa details
     if (devNetType) rememberState("loraDevNetType", devNetType)
-    if (signal != null) sendEvent(name: "signal", value: "${signal} dBm", isStateChange: true)
+    if (signal != null) sendEvent(name: "signal", value: "${signal} dBm")
     if (gateways != null) rememberState("gateways", gateways as int)
     if (gatewayId != null) rememberState("gatewayId", gatewayId)
 
@@ -290,12 +319,12 @@ def processStateData(String payload) {
         def reportAt  = data?.reportAt
         def changedAt = data?.stateChangedAt
 
-        if (tempC != null)  sendEvent(name: "temperature", value: convertCToPreferred(tempC), unit: activeScale(), isStateChange: true)
-        if (humidity != null) sendEvent(name: "humidity", value: humidity, unit: "%", isStateChange: true)
+        if (tempC != null)  sendEvent(name: "temperature", value: convertCToPreferred(tempC), unit: activeScale())
+        if (humidity != null) sendEvent(name: "humidity", value: humidity, unit: "%")
         if (batteryPct != null) rememberBatteryState(batteryPct as int, false)
         if (fw) rememberState("firmware", fw)
 
-        rememberState("state", stateStr)
+        if (stateStr) rememberState("state", stateStr)
         if (mode) rememberState("mode", mode)
         if (interval != null) rememberState("interval", interval as int)
 
@@ -303,29 +332,31 @@ def processStateData(String payload) {
         if (tMaxC != null) rememberState("tempLimitMax", convertCToPreferred(tMaxC))
         if (hMin  != null) rememberState("humidityLimitMin", hMin as double)
         if (hMax  != null) rememberState("humidityLimitMax", hMax as double)
-        if (tCorrC!= null) rememberState("tempCorrection", convertCToPreferred(tCorrC))
+        if (tCorrC!= null) rememberState("tempCorrection", convertCDeltaToPreferred(tCorrC))
         if (hCorr != null) rememberState("humidityCorrection", hCorr as double)
 
-        Integer aCode = (alarm?.code as Integer)
-        def flags = [
-            lowBattery  : alarm?.lowBattery,
-            lowTemp     : alarm?.lowTemp,
-            highTemp    : alarm?.highTemp,
-            lowHumidity : alarm?.lowHumidity,
-            highHumidity: alarm?.highHumidity,
-            period      : alarm?.period
-        ]
-        rememberState("alarmCode", aCode)
-        rememberState("alarmLowBattery",  (flags.lowBattery  == null) ? "" : flags.lowBattery.toString())
-        rememberState("alarmLowTemp",     (flags.lowTemp     == null) ? "" : flags.lowTemp.toString())
-        rememberState("alarmHighTemp",    (flags.highTemp    == null) ? "" : flags.highTemp.toString())
-        rememberState("alarmLowHumidity", (flags.lowHumidity == null) ? "" : flags.lowHumidity.toString())
-        rememberState("alarmHighHumidity",(flags.highHumidity== null) ? "" : flags.highHumidity.toString())
-        rememberState("alarmPeriod",      (flags.period      == null) ? "" : flags.period.toString())
-        rememberState("alarmSummary", summarizeAlarms(flags))
+        if (alarm instanceof Map && !alarm.isEmpty()) {
+            Integer aCode = (alarm?.code as Integer)
+            def flags = [
+                lowBattery  : alarm?.lowBattery,
+                lowTemp     : alarm?.lowTemp,
+                highTemp    : alarm?.highTemp,
+                lowHumidity : alarm?.lowHumidity,
+                highHumidity: alarm?.highHumidity,
+                period      : alarm?.period
+            ]
+            if (aCode != null) rememberState("alarmCode", aCode)
+            rememberState("alarmLowBattery",  (flags.lowBattery  == null) ? "" : flags.lowBattery.toString())
+            rememberState("alarmLowTemp",     (flags.lowTemp     == null) ? "" : flags.lowTemp.toString())
+            rememberState("alarmHighTemp",    (flags.highTemp    == null) ? "" : flags.highTemp.toString())
+            rememberState("alarmLowHumidity", (flags.lowHumidity == null) ? "" : flags.lowHumidity.toString())
+            rememberState("alarmHighHumidity",(flags.highHumidity== null) ? "" : flags.highHumidity.toString())
+            rememberState("alarmPeriod",      (flags.period      == null) ? "" : flags.period.toString())
+            rememberState("alarmSummary", summarizeAlarms(flags))
+        }
 
         if (devNet) rememberState("loraDevNetType", devNet)
-        if (signal != null) sendEvent(name: "signal", value: "${signal} dBm", isStateChange: true)
+        if (signal != null) sendEvent(name: "signal", value: "${signal} dBm")
         if (gateways != null) rememberState("gateways", gateways as int)
         if (gatewayId != null) rememberState("gatewayId", gatewayId)
 
@@ -347,30 +378,31 @@ def reset() {
     poll(true)
 }
 
-def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value", isStateChange: true) }
+def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value") }
 
 def rememberState(name, value, unit=null) {
     if (state."$name" != value) {
         state."$name" = value
         if (unit) {
-            sendEvent(name: "$name", value: "$value", unit: "$unit", isStateChange: true)
+            sendEvent(name: "$name", value: "$value", unit: "$unit")
         } else {
-            sendEvent(name: "$name", value: "$value", isStateChange: true)
+            sendEvent(name: "$name", value: "$value")
         }
     }
 }
 
 def rememberBatteryState(def value, boolean forceSend = false) {
+    if (value == null) return            // no reading in this message: leave battery as is
     if (state.battery != value || forceSend) {
         state.battery = value
-        sendEvent(name: "battery", value: value?.toString(), unit: "%", isStateChange: true)
+        sendEvent(name: "battery", value: value?.toString(), unit: "%")
         logDebug("rememberBatteryState: battery => ${value}% (forceSend=${forceSend})")
     }
 }
 
 /* === Formatting helpers (format comes from parent app) === */
 private String activeFmt() { parent?.getDateTimeFormat() ?: "MM/dd/yyyy hh:mm:ss a" }
-private String activeScale() { parent?.temperatureScale() ?: "C" }
+private String activeScale() { parent?.temperatureScale() ?: "F" }
 
 private String fmtTs(def ts) {
     String f = activeFmt()
@@ -407,6 +439,16 @@ private def convertCToPreferred(def tempC) {
     } catch (e) {
         log.warn "parent.convertTemperature failed (${e}); using raw °C"
         return tempC
+    }
+}
+
+/* Offsets are temperature differences: scale by 9/5 for °F, no +32 */
+private def convertCDeltaToPreferred(def deltaC) {
+    try {
+        return parent?.convertTemperatureDelta(deltaC)
+    } catch (e) {
+        log.warn "parent.convertTemperatureDelta failed (${e}); using raw °C"
+        return deltaC
     }
 }
 

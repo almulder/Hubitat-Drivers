@@ -20,12 +20,34 @@
  *  in the name, SKU and max price (any of which can be overridden).
  *
  *  0.1.0 - Initial release
+ *  0.1.1 - Fixed a repeat in-stock alert after the first Done on a new item. The alert is now
+ *          marked sent before notifying, and one failing device no longer blocks the others or
+ *          causes the alert to repeat every check. Overlapping checks run one at a time.
+ *          "Possibly in stock" (no stock info published) no longer alerts unless you turn it on.
+ *          A price that can't be read no longer counts as under your max price. Product groups
+ *          answer from their variants; the SKU filter also applies to meta-tag data. Better
+ *          price parsing (1.299,00 and ranges) and HTML entity decoding. The test button no
+ *          longer turns on your switches. Message defaults follow the watch mode. Paused items
+ *          skip queued checks, the failure heads-up also goes to speakers, and the daily run
+ *          skips text items and replaces that item's pending regular check.
+ *          In stock with a max price set but a price that can't be read now shows "price
+ *          unreadable" and neither alerts nor resets. Variant choice is stable (lowest-priced
+ *          qualifying variant) and honours the "possibly in stock" setting. Prices like
+ *          1.299 and 1 299,00 read as thousands; more currency entities are decoded; the page
+ *          is only stripped to text when that's actually needed.
  */
 import groovy.json.JsonSlurper
 import groovy.transform.Field
 
-@Field static final String APP_VERSION = "0.1.0"
-@Field static final List IN_STOCK = ["InStock", "LimitedAvailability", "PossiblyInStock"]
+@Field static final String APP_VERSION = "0.1.1"
+@Field static final List IN_STOCK = ["InStock", "LimitedAvailability"]
+@Field static final String PRODUCT_ALERT = "%name% is in stock for \$%price%. %url%"
+@Field static final String TEXT_ALERT    = "%name%: %status%. %url%"
+@Field static final String PRODUCT_RESET = "%name% is no longer available (%status%)."
+@Field static final String TEXT_RESET    = "%name%: %status%."
+
+// Per-execution cache of the parent's debug flag.
+@Field Boolean debugFlag = null
 
 definition(
     name: "Restock Manager Item",
@@ -36,6 +58,7 @@ definition(
     category: "Convenience",
     iconUrl: "",
     iconX2Url: "",
+    singleThreaded: true,
     importUrl: "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Restock%20Manager/App/Restock%20Manager%20Item.groovy"
 )
 
@@ -45,11 +68,13 @@ preferences {
 
 def mainPage() {
     boolean isProduct = (watchType ?: "product") == "product"
+    syncDefaultMessages(isProduct)
     dynamicPage(name: "mainPage", title: "Watched item", install: true, uninstall: true) {
         section("Link") {
             input "productUrl", "text", title: "Page URL", required: true, submitOnChange: true
             input "verifyLink", "button", title: "Verify link & read info"
-            if (state.verify) paragraph verifySummary()
+            // Only show the summary for the link it was made for.
+            if (state.verify && state.verify.url == productUrl) paragraph verifySummary()
         }
 
         section("What to watch") {
@@ -65,6 +90,8 @@ def mainPage() {
                     title: "Max price — filled in with the site's current price. Change it to set your own limit, or clear it for any price."
                 input "alertPriceDrops", "bool", defaultValue: false,
                     title: "Alert again if the price drops further while it's in stock"
+                input "possiblyInStock", "bool", defaultValue: false,
+                    title: "Treat \"possibly in stock\" (the store publishes no stock status) as in stock"
             } else {
                 input "watchText", "text", title: "Text to look for (not case-sensitive)", required: true
                 input "textCondition", "enum", title: "Alert when that text", required: true,
@@ -82,7 +109,7 @@ def mainPage() {
             input "switches", "capability.switch", title: "Turn on these switches (e.g. a light or virtual switch)",
                 multiple: true, required: false
             input "alertMsg", "text", title: "Message", required: true,
-                defaultValue: isProduct ? "%name% is in stock for \$%price%. %url%" : "%name%: %status%. %url%"
+                defaultValue: isProduct ? PRODUCT_ALERT : TEXT_ALERT
         }
 
         section("When it resets (optional)") {
@@ -91,7 +118,7 @@ def mainPage() {
                                    "Also notify when the page changes back"
             if (notifyReset) {
                 input "resetMsg", "text", title: "Message", required: true,
-                    defaultValue: isProduct ? "%name% is no longer available (%status%)." : "%name%: %status%."
+                    defaultValue: isProduct ? PRODUCT_RESET : TEXT_RESET
             }
         }
 
@@ -121,7 +148,7 @@ def mainPage() {
             String priceText = (isProduct && state.lastPrice != null) ? " — \$${fmtPrice(state.lastPrice)}" : ""
             paragraph "Status: ${humanStatus(state.lastStatus)}${priceText}<br>Last check: ${state.lastCheck ?: 'never'}"
             input "checkNow", "button", title: "Check now"
-            input "testNotify", "button", title: "Send test notification (checks the page now and applies your rules)"
+            input "testNotify", "button", title: "Send test notification (checks the page now and applies your rules; switches aren't turned on)"
             paragraph "<small>Restock Manager Item v${APP_VERSION}</small>"
         }
     }
@@ -129,18 +156,38 @@ def mainPage() {
 
 // ---------- Lifecycle ----------
 
-def installed() { initialize() }
+def installed() {
+    state.configSig = configSignature()
+    initialize()
+}
 
 def updated() {
     // Changing what's watched starts fresh.
-    String sig = "${productUrl}|${watchType}|${skuMatch}|${watchText}|${textCondition}"
+    String sig = configSignature()
     if (state.configSig != sig) {
         state.alerted = false
         state.alertedPrice = null
+        state.failCount = 0
         state.configSig = sig
     }
     state.remove("lastAlertAt")   // from the earlier reminder version
+    syncDefaultMessages((watchType ?: "product") == "product")
     initialize()
+}
+
+private String configSignature() {
+    return "${productUrl}|${watchType}|${skuMatch}|${watchText}|${textCondition}"
+}
+
+// If a message still holds the other mode's default wording, swap in this mode's default
+// (e.g. Verify switched the item from product to text). Custom wording is left alone.
+private void syncDefaultMessages(boolean isProduct) {
+    if (alertMsg == (isProduct ? TEXT_ALERT : PRODUCT_ALERT)) {
+        app.updateSetting("alertMsg", [value: isProduct ? PRODUCT_ALERT : TEXT_ALERT, type: "text"])
+    }
+    if (resetMsg == (isProduct ? TEXT_RESET : PRODUCT_RESET)) {
+        app.updateSetting("resetMsg", [value: isProduct ? PRODUCT_RESET : TEXT_RESET, type: "text"])
+    }
 }
 
 def initialize() {
@@ -158,7 +205,7 @@ def appButtonHandler(String btn) {
             verifyLinkNow()
             break
         case "checkNow":
-            checkStock()
+            fetchAsync("check")   // manual check works on paused items too
             break
         case "testNotify":
             testNotifyNow()
@@ -166,17 +213,26 @@ def appButtonHandler(String btn) {
     }
 }
 
-// Called by the parent on its schedule
-def scheduleCheck(Integer delaySeconds) {
-    if (enabled != false) runIn(delaySeconds ?: 1, "checkStock")
+// Called by the parent on its schedule. nearDaily is true when this pass lands within a
+// few minutes of the daily reminder time; product items skip it because the daily run
+// checks them anyway. Text items aren't part of the daily run, so they always check.
+def scheduleCheck(Integer delaySeconds, Boolean nearDaily = false) {
+    if (enabled == false) return
+    if (nearDaily && (watchType ?: "product") == "product") return
+    runIn(delaySeconds ?: 1, "checkStock")
 }
 
-// Called by the parent at the daily reminder time
+// Called by the parent at the daily reminder time. Text items have no reminders, so they
+// just keep their regular schedule. For product items the daily fetch is a full check, so
+// it replaces any regular check still queued for this item.
 def dailyCheck(Integer delaySeconds) {
-    if (enabled != false) runIn(delaySeconds ?: 1, "dailyCheckNow")
+    if (enabled == false || (watchType ?: "product") != "product") return
+    unschedule("checkStock")
+    runIn(delaySeconds ?: 1, "dailyCheckNow")
 }
 
 def dailyCheckNow() {
+    if (enabled == false) return
     fetchAsync("daily")
 }
 
@@ -198,43 +254,49 @@ private void scheduleIntervalReminder() {
 
 private void verifyLinkNow() {
     if (!productUrl) {
-        state.verify = [error: "Enter a URL first."]
+        setVerify([error: "Enter a URL first."])
         return
     }
     String html = null
     try {
         html = fetchSync()
     } catch (e) {
-        state.verify = [error: "Couldn't load the page: ${e.message}"]
+        setVerify([error: "Couldn't load the page: ${e.message}"])
         return
     }
     if (!html) {
-        state.verify = [error: "The page came back empty."]
+        setVerify([error: "The page came back empty."])
         return
     }
 
     boolean newUrl = state.verifiedUrl != productUrl
     // On a new link, ignore any old SKU filter so we read the page's main product.
-    Map r = parseProduct(html, newUrl ? "" : normalize(skuMatch))
+    Map r = parseProduct(html, newUrl ? "" : normalize(skuMatch), null)
     String title = pageTitle(html)
+    String vis = r.found ? null : visibleText(html)
 
     if (r.found) {
-        state.verify = [type: "product", name: r.name, price: r.price, status: r.status, title: title]
+        setVerify([type: "product", name: r.name, price: r.price, status: r.status, title: title])
         if (newUrl || watchType == null) app.updateSetting("watchType", [value: "product", type: "enum"])
         if (r.name && (newUrl || !itemName)) app.updateSetting("itemName", [value: r.name, type: "text"])
         if (r.sku && (newUrl || !skuMatch)) app.updateSetting("skuMatch", [value: r.sku, type: "text"])
         if (r.price != null && newUrl) app.updateSetting("maxPrice", [value: r.price, type: "decimal"])
-    } else if (looksBlocked(html)) {
-        state.verify = [error: "The site returned a block, CAPTCHA, or near-empty page, so the hub can't read it. This site probably won't work."]
+    } else if (looksBlocked(vis)) {
+        setVerify([error: "The site returned a block, CAPTCHA, or near-empty page, so the hub can't read it. This site probably won't work."])
         return
     } else {
         Map v = [type: "text", title: title]
         if (newUrl) app.updateSetting("watchType", [value: "text", type: "enum"])
         if (title && (newUrl || !itemName)) app.updateSetting("itemName", [value: title, type: "text"])
-        if (watchText) v.textFound = visibleText(html).toLowerCase().contains(watchText.toLowerCase())
-        state.verify = v
+        if (watchText) v.textFound = vis.toLowerCase().contains(watchText.toLowerCase())
+        setVerify(v)
     }
     state.verifiedUrl = productUrl
+}
+
+private void setVerify(Map v) {
+    v.url = productUrl
+    state.verify = v
 }
 
 private String verifySummary() {
@@ -257,10 +319,10 @@ private String verifySummary() {
 // ---------- Test notification ----------
 
 // Loads the page now, applies this item's current rules, and sends a [TEST]
-// message showing exactly what would happen. Does not change alert state.
+// message showing exactly what would happen. Does not change alert state, and
+// doesn't turn on switches, so a test can't set off automations.
 private void testNotifyNow() {
     String msg
-    boolean wouldTrigger = false
     String html = null
     try {
         html = fetchSync()
@@ -278,13 +340,12 @@ private void testNotifyNow() {
             if ((watchType ?: "product") == "product") state.lastPrice = e.r.price
             updateStatusLabel()
             if (e.triggered) {
-                wouldTrigger = true
                 msg = "[TEST] " + fillTemplate(alertMsg, e.r)
             } else {
                 // Not triggered: send the "resets" message if one is set up,
                 // otherwise a plain status notice (e.g. out of stock).
-                if (notifyReset && resetMsg) {
-                    Map rr = e.r + ((e.r.status in IN_STOCK) ? [status: "AbovePrice"] : [:])
+                if (notifyReset && resetMsg && !e.priceUnknown) {
+                    Map rr = e.r + (isInStock(e.r.status) ? [status: "AbovePrice"] : [:])
                     msg = "[TEST] " + fillTemplate(resetMsg, rr)
                 } else {
                     msg = "[TEST] ${displayName()}: ${e.reason}."
@@ -292,27 +353,32 @@ private void testNotifyNow() {
             }
         }
     }
-    deliver(msg ?: "[TEST] ${displayName()}: page came back empty.", wouldTrigger)
+    deliver(msg ?: "[TEST] ${displayName()}: page came back empty.", false)
 }
 
 // Applies the current rules to a page without side effects.
 private Map evaluateRules(String html) {
     if ((watchType ?: "product") == "text") {
-        if (looksBlocked(html)) return [error: "the site returned a block, CAPTCHA, or near-empty page"]
-        boolean found = visibleText(html).toLowerCase().contains((watchText ?: "").toLowerCase())
+        String vis = visibleText(html)
+        if (looksBlocked(vis)) return [error: "the site returned a block, CAPTCHA, or near-empty page"]
+        boolean found = vis.toLowerCase().contains((watchText ?: "").toLowerCase())
         boolean appears = (textCondition ?: "appears") == "appears"
         boolean triggered = appears ? found : !found
         String reason = appears ? "\"${watchText}\" isn't on the page" : "\"${watchText}\" is still on the page"
         return [r: [price: null, status: found ? "TextFound" : "TextMissing"], triggered: triggered, reason: reason]
     }
 
-    Map r = parseProduct(html, normalize(skuMatch))
+    Map r = parseProduct(html, normalize(skuMatch), null)
     if (!r.found) {
-        return [error: looksBlocked(html) ? "the site returned a block, CAPTCHA, or near-empty page" :
-                                            "no product data was found on the page"]
+        return [error: looksBlocked(visibleText(html)) ? "the site returned a block, CAPTCHA, or near-empty page" :
+                                                         "no product data was found on the page"]
     }
-    boolean inStock = r.status in IN_STOCK
-    boolean priceOk = (maxPrice == null || r.price == null || (r.price as BigDecimal) <= (maxPrice as BigDecimal))
+    boolean inStock = isInStock(r.status)
+    if (priceUnknown(inStock, r.price)) {
+        return [r: r + [status: "PriceUnknown"], triggered: false, priceUnknown: true,
+                reason: "it's in stock but the price couldn't be read, so your max of \$${fmtPrice(maxPrice)} can't be checked"]
+    }
+    boolean priceOk = priceWithinMax(r.price)
     String reason = null
     if (!inStock) {
         reason = "it's ${humanStatus(r.status).toLowerCase()}" + (r.price != null ? " (\$${fmtPrice(r.price)})" : "")
@@ -333,7 +399,10 @@ private String fetchSync() {
 
 // ---------- Checking ----------
 
+// Scheduled check (from the parent or initialize). Skipped while paused, so a check
+// queued before the item was paused doesn't run.
 def checkStock() {
+    if (enabled == false) return
     fetchAsync("check")
 }
 
@@ -367,15 +436,18 @@ private void processResponse(resp, String purpose) {
     String html = resp.getData()?.toString() ?: ""
 
     if ((watchType ?: "product") == "text") {
-        if (looksBlocked(html)) {
+        String vis = visibleText(html)
+        if (looksBlocked(vis)) {
             handleFailure("blocked, CAPTCHA, or near-empty page")
             return
         }
         state.failCount = 0
-        processText(html)
+        processText(vis)
     } else {
-        Map r = parseProduct(html, normalize(skuMatch))
-        if (!r.found && looksBlocked(html)) {
+        // The page is only stripped to text when it's needed: here for the block check,
+        // or inside parseProduct for the no-stock-status fallback.
+        Map r = parseProduct(html, normalize(skuMatch), null)
+        if (!r.found && looksBlocked(visibleText(html))) {
             handleFailure("blocked, CAPTCHA, or near-empty page")
             if (purpose == "interval" && state.alerted) scheduleIntervalReminder()
             return
@@ -393,7 +465,7 @@ private void handleFailure(String reason) {
     updateStatusLabel()
     if (state.failCount == 6) {
         String msg = "Restock Manager can't read the page for ${displayName()} (6 failures in a row). Check the hub logs."
-        notifyDevices?.each { it.deviceNotification(msg) }
+        deliver(msg, false)
     }
 }
 
@@ -405,23 +477,32 @@ private void processProduct(Map r, String purpose) {
         if (purpose == "interval" && state.alerted) scheduleIntervalReminder()
         return
     }
+    boolean inStock = isInStock(r.status)
+    if (priceUnknown(inStock, r.price)) {
+        // In stock but the price can't be read, so the max can't be checked. Don't alert
+        // and don't reset: keep the current state until a readable price comes back.
+        state.lastStatus = "PriceUnknown"
+        state.lastPrice = null
+        logD "${displayName()}: in stock but the price couldn't be read; keeping the current alert state"
+        if (purpose == "interval" && state.alerted) scheduleIntervalReminder()
+        return
+    }
     state.lastStatus = r.status
     state.lastPrice = r.price
-
-    boolean inStock = r.status in IN_STOCK
-    boolean priceOk = (maxPrice == null || r.price == null || (r.price as BigDecimal) <= (maxPrice as BigDecimal))
+    boolean priceOk = priceWithinMax(r.price)
 
     if (inStock && priceOk) {
         if (!state.alerted) {
-            // First time in stock: the main alert, then start the reminder loop.
-            sendAlert(alertMsg, r)
+            // First time in stock: mark it alerted before notifying, so a device that
+            // throws can't make the alert repeat on every check. Then start reminders.
             state.alerted = true
             state.alertedPrice = r.price
+            sendAlert(alertMsg, r)
             scheduleIntervalReminder()
         } else if (alertPriceDrops && r.price != null && state.alertedPrice != null &&
                    (r.price as BigDecimal) < (state.alertedPrice as BigDecimal)) {
-            sendAlert(alertMsg, r + [status: "PriceDrop"])
             state.alertedPrice = r.price
+            sendAlert(alertMsg, r + [status: "PriceDrop"])
             if (purpose == "interval") scheduleIntervalReminder()
         } else if (purpose == "interval") {
             sendReminder(r)
@@ -431,11 +512,12 @@ private void processProduct(Map r, String purpose) {
         }
     } else {
         if (inStock && !priceOk) logD "${displayName()}: in stock but \$${fmtPrice(r.price)} is above max \$${fmtPrice(maxPrice)}"
-        if (state.alerted && notifyReset && resetMsg) {
-            sendAlert(resetMsg, r + [status: inStock ? "AbovePrice" : r.status])
-        }
+        boolean wasAlerted = state.alerted
         state.alerted = false
         state.alertedPrice = null
+        if (wasAlerted && notifyReset && resetMsg) {
+            sendAlert(resetMsg, r + [status: inStock ? "AbovePrice" : r.status])
+        }
         unschedule("intervalReminderCheck")   // no reminders while out of stock
     }
 }
@@ -445,8 +527,9 @@ private void sendReminder(Map r) {
     deliver(fillTemplate(tmpl, r), false)
 }
 
-private void processText(String html) {
-    boolean found = visibleText(html).toLowerCase().contains((watchText ?: "").toLowerCase())
+// vis is the page's visible text (already stripped of tags).
+private void processText(String vis) {
+    boolean found = vis.toLowerCase().contains((watchText ?: "").toLowerCase())
     boolean triggered = ((textCondition ?: "appears") == "appears") ? found : !found
     state.lastStatus = found ? "TextFound" : "TextMissing"
     logD "${displayName()}: text found=${found}, triggered=${triggered}"
@@ -454,18 +537,21 @@ private void processText(String html) {
     Map r = [price: null, status: state.lastStatus]
     if (triggered) {
         if (!state.alerted) {
-            sendAlert(alertMsg, r)
             state.alerted = true
+            sendAlert(alertMsg, r)
         }
     } else {
-        if (state.alerted && notifyReset && resetMsg) sendAlert(resetMsg, r)
+        boolean wasAlerted = state.alerted
         state.alerted = false
+        if (wasAlerted && notifyReset && resetMsg) sendAlert(resetMsg, r)
     }
 }
 
 // ---------- Page parsing ----------
 
-private Map parseProduct(String html, String needle) {
+// vis is the page's visible text if the caller already has it, or null to strip the page
+// only if the no-stock-status fallback needs it.
+private Map parseProduct(String html, String needle, String vis) {
     Map found = null
 
     // 1) schema.org JSON-LD
@@ -480,36 +566,24 @@ private Map parseProduct(String html, String needle) {
         }
         List items = (json instanceof List) ? json :
                      ((json instanceof Map && json["@graph"]) ? (json["@graph"] instanceof List ? json["@graph"] : [json["@graph"]]) : [json])
-        List cands = []
-        items.each { it ->
-            if (it instanceof Map) {
-                cands << it
-                if (it.hasVariant instanceof List) it.hasVariant.each { v -> if (v instanceof Map) cands << v }
-            }
-        }
-        for (item in cands) {
-            String type = item["@type"]?.toString() ?: ""
-            if (!type.contains("Product")) continue
-            String name = item.name?.toString()
-            String sku = item.sku?.toString()
-            if (needle && !(normalize(sku).contains(needle) || normalize(name).contains(needle))) continue
-            Map offer = pickOffer(item.offers)
-            if (!offer && item.hasVariant) continue   // product group: let its variants answer
-            def priceRaw = offer ? (offer.price ?: offer.lowPrice ?: specPrice(offer.priceSpecification)) : null
-            found = [found : true, name: name, sku: sku,
-                     price : parsePrice(priceRaw),
-                     status: normalizeAvail(offer?.availability?.toString())]
-            break
+        for (item in items) {
+            if (!(item instanceof Map)) continue
+            found = productFrom((Map) item, needle)
+            if (found) break
         }
     }
 
-    // 2) Open Graph / product meta tags and microdata
+    // 2) Open Graph / product meta tags and microdata (only scanned when JSON-LD left gaps)
+    if (found && found.price != null && found.status) return found
     Map meta = metaTags(html)
     def metaPrice = parsePrice(meta["product:price:amount"] ?: meta["og:price:amount"] ?: meta["price"])
     String metaAvail = normalizeAvail(meta["product:availability"] ?: meta["og:availability"] ?: meta["availability"])
     if (!found && (metaPrice != null || metaAvail)) {
-        found = [found: true, name: meta["og:title"] ?: pageTitle(html), sku: meta["product:retailer_item_id"] ?: meta["sku"],
-                 price: metaPrice, status: metaAvail]
+        String metaName = meta["og:title"] ?: pageTitle(html)
+        String metaSku = meta["product:retailer_item_id"] ?: meta["sku"]
+        // With a SKU filter set, page-level data only counts if it's that product.
+        if (needle && !(normalize(metaSku).contains(needle) || normalize(metaName).contains(needle))) return [found: false]
+        found = [found: true, name: metaName, sku: metaSku, price: metaPrice, status: metaAvail]
     }
     if (!found) return [found: false]
 
@@ -518,11 +592,53 @@ private Map parseProduct(String html, String needle) {
 
     // 3) Last resort when no availability is published
     if (!found.status) {
-        String lower = visibleText(html).toLowerCase()
+        String lower = (vis != null ? vis : visibleText(html)).toLowerCase()
         boolean outText = ["out of stock", "sold out", "expected restock", "currently unavailable", "coming soon"].any { lower.contains(it) }
         found.status = outText ? "OutOfStock" : "PossiblyInStock"
     }
     return found
+}
+
+// One JSON-LD item -> product result, or null. A product group with variants answers from
+// its variants, falling back to its own offer. See pickVariant for which variant wins.
+private Map productFrom(Map item, String needle) {
+    List variants = (item.hasVariant instanceof List) ? item.hasVariant.findAll { it instanceof Map } : []
+    if (variants) {
+        List hits = variants.collect { productFrom((Map) it, needle) }.findAll { it }
+        if (hits) return pickVariant(hits)
+    }
+    String type = item["@type"]?.toString() ?: ""
+    if (!type.contains("Product")) return null
+    String name = item.name?.toString()
+    String sku = item.sku?.toString()
+    if (needle && !(normalize(sku).contains(needle) || normalize(name).contains(needle))) return null
+    Map offer = pickOffer(item.offers)
+    if (!offer && variants) return null   // product group with no usable variant or offer
+    def priceRaw = offer ? firstPresent([offer.price, offer.lowPrice, specPrice(offer.priceSpecification)]) : null
+    return [found : true, name: name, sku: sku,
+            price : parsePrice(priceRaw),
+            status: normalizeAvail(offer?.availability?.toString())]
+}
+
+// Prefer the lowest-priced variant that's in stock and under the max, then the lowest-priced
+// in-stock one, then the first. Picking by price keeps the choice stable between checks, so
+// a different variant answering doesn't look like a price drop.
+private Map pickVariant(List hits) {
+    Closure byPrice = { a, b ->
+        if (a.price == null) return (b.price == null) ? 0 : 1
+        if (b.price == null) return -1
+        return (a.price as BigDecimal) <=> (b.price as BigDecimal)
+    }
+    List qualifying = hits.findAll { isInStock(it.status) && priceWithinMax(it.price) }
+    if (qualifying) return qualifying.sort(false, byPrice)[0]
+    List inStock = hits.findAll { isInStock(it.status) }
+    if (inStock) return inStock.sort(false, byPrice)[0]
+    return hits[0]
+}
+
+// First value that isn't null or blank (a real price of 0 counts).
+private def firstPresent(List vals) {
+    return vals.find { it != null && it.toString().trim() != "" }
 }
 
 private Map pickOffer(def o) {
@@ -549,8 +665,11 @@ private Map metaTags(String html) {
 }
 
 private String attr(String tag, String name) {
-    def m = (tag =~ /(?i)\b${name}\s*=\s*["']([^"']*)["']/)
-    return m.find() ? m.group(1) : null
+    // Not preceded by "-" or a word char, so name= doesn't match data-name=. Each quote
+    // style is matched on its own, so content="Joe's Widget" is read whole.
+    def m = (tag =~ /(?i)(?<![-\w])${name}\s*=\s*(?:"([^"]*)"|'([^']*)')/)
+    if (!m.find()) return null
+    return m.group(1) != null ? m.group(1) : m.group(2)
 }
 
 private String pageTitle(String html) {
@@ -566,13 +685,34 @@ private String visibleText(String html) {
         .replaceAll(/\s+/, " ").trim()
 }
 
+@Field static final Map ENTITIES = [
+    "&nbsp;": " ", "&quot;": "\"", "&apos;": "'", "&lt;": "<", "&gt;": ">",
+    "&rsquo;": "'", "&lsquo;": "'", "&rdquo;": "\"", "&ldquo;": "\"",
+    "&ndash;": "-", "&mdash;": "-", "&hellip;": "...", "&trade;": "\u2122", "&reg;": "\u00AE", "&copy;": "\u00A9",
+    "&euro;": "\u20AC", "&pound;": "\u00A3", "&yen;": "\u00A5", "&cent;": "\u00A2", "&curren;": "\u00A4",
+    "&deg;": "\u00B0", "&times;": "x", "&frac12;": "1/2", "&thinsp;": " ", "&ensp;": " ", "&emsp;": " "
+]
+
 private String decode(String s) {
-    return (s ?: "").replace("&nbsp;", " ").replace("&amp;", "&").replace("&#39;", "'")
-        .replace("&#x27;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">")
+    String out = (s ?: "")
+    ENTITIES.each { k, v -> out = out.replace(k, v) }
+    out = out.replaceAll(/&#[xX]([0-9a-fA-F]{1,6});/) { String all, String hex -> codePointText(Integer.parseInt(hex, 16)) }
+    out = out.replaceAll(/&#(\d{1,7});/) { String all, String dec -> codePointText(Integer.parseInt(dec)) }
+    return out.replace("&amp;", "&")   // last, so "&amp;lt;" stays "&lt;"
 }
 
-private boolean looksBlocked(String html) {
-    String vis = visibleText(html)
+private String codePointText(int cp) {
+    // Curly quotes become plain ones so watched text like "Don't" still matches.
+    if (cp == 0x2018 || cp == 0x2019) return "'"
+    if (cp == 0x201C || cp == 0x201D) return "\""
+    if (cp == 0xA0) return " "
+    if (cp <= 0 || cp > 0xFFFF) return " "
+    return ((char) cp).toString()
+}
+
+// vis is the page's visible text (see visibleText).
+private boolean looksBlocked(String vis) {
+    vis = vis ?: ""
     String l = vis.toLowerCase()
     return vis.length() < 200 ||
         l.contains("verify you are human") || l.contains("are you a robot") ||
@@ -597,13 +737,43 @@ private String normalizeAvail(String s) {
 
 private BigDecimal parsePrice(def p) {
     if (p == null) return null
-    String s = p.toString().replaceAll(/[^0-9.]/, "")
-    if (!s) return null
+    if (p instanceof Number) return p as BigDecimal
+    // First number in the text, so a range like "19.99 - 29.99" reads as its low end. Space
+    // or no-break-space thousands groups ("1 299,00") are read as one number.
+    def m = (p.toString() =~ /\d{1,3}(?:[ \u00A0\u202F]\d{3})+(?:[.,]\d+)?|\d[\d.,]*/)
+    if (!m.find()) return null
+    String s = m.group().replaceAll(/[ \u00A0\u202F]/, "").replaceAll(/[.,]+$/, "")
+    int dot = s.lastIndexOf(".")
+    int comma = s.lastIndexOf(",")
+    if (dot >= 0 && comma >= 0) {
+        // Both present: whichever comes last is the decimal point (1,299.00 / 1.299,00).
+        s = (comma > dot) ? s.replace(".", "").replace(",", ".") : s.replace(",", "")
+    } else if (comma >= 0) {
+        // Only commas: thousands groups (1,299) or a decimal comma (12,99).
+        s = (s ==~ /\d{1,3}(,\d{3})+/) ? s.replace(",", "") : s.replace(",", ".")
+    } else if (s ==~ /\d{1,3}(\.\d{3})+/) {
+        s = s.replace(".", "")   // dot thousands groups: 1.299 / 1.299.000
+    }
     try {
         return new BigDecimal(s)
     } catch (e) {
         return null
     }
+}
+
+private boolean isInStock(String status) {
+    return status in IN_STOCK || (status == "PossiblyInStock" && possiblyInStock == true)
+}
+
+// In stock with a max price set, but no readable price: the max can't be checked.
+private boolean priceUnknown(boolean inStock, def price) {
+    return inStock && maxPrice != null && price == null
+}
+
+// With a max price set, the price has to be known and at or under it.
+private boolean priceWithinMax(def price) {
+    if (maxPrice == null) return true
+    return price != null && (price as BigDecimal) <= (maxPrice as BigDecimal)
 }
 
 // ---------- Notifications & display ----------
@@ -625,14 +795,23 @@ private void sendAlert(String template, Map r) {
     deliver(fillTemplate(template, r), true)
 }
 
+// Each device is tried on its own, so one that fails doesn't stop the rest.
 private void deliver(String msg, boolean useSwitches) {
     log.info "${displayName()}: ${msg}"
-    notifyDevices?.each { it.deviceNotification(msg) }
+    notifyDevices?.each { d -> tryDevice(d, "notify") { d.deviceNotification(msg) } }
     if (speakers) {
         String spoken = msg.replaceAll(/https?:\/\/\S+/, "").trim()
-        speakers.each { it.speak(spoken) }
+        speakers.each { d -> tryDevice(d, "speak on") { d.speak(spoken) } }
     }
-    if (useSwitches) switches?.each { it.on() }
+    if (useSwitches) switches?.each { d -> tryDevice(d, "turn on") { d.on() } }
+}
+
+private void tryDevice(d, String what, Closure action) {
+    try {
+        action()
+    } catch (e) {
+        log.warn "${displayName()}: couldn't ${what} ${d}: ${e}"
+    }
 }
 
 private String fillTemplate(String template, Map r) {
@@ -669,6 +848,7 @@ private String humanStatus(String s) {
         case "InStoreOnly": return "In-store only"
         case "PriceDrop": return "Price dropped"
         case "AbovePrice": return "Above your max price"
+        case "PriceUnknown": return "In stock, price unreadable"
         case "TextFound": return "\"${watchText}\" is on the page"
         case "TextMissing": return "\"${watchText}\" is not on the page"
         case "Unknown": return "No product data found"
@@ -686,5 +866,6 @@ private String fmtPrice(def p) {
 }
 
 private void logD(String msg) {
-    if (parent?.isDebug()) log.debug msg
+    if (debugFlag == null) debugFlag = (parent?.isDebug() == true)
+    if (debugFlag) log.debug msg
 }

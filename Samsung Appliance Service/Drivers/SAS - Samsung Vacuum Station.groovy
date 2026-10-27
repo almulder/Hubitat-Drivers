@@ -12,8 +12,14 @@
  *  the right cycles and names on whatever board it meets. An entity upstream
  *  adds later still appears, named from its suffix, via emitGeneric.
  *
- *  Version: 0.5.0
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - Subdevice selects are named like every other subdevice reading,
+ *      e.g. subdevice1CookingMode, no longer Subdevice1CookingMode.
+ *    - Battery capability; battery is a number.
  */
 
 metadata {
@@ -21,12 +27,12 @@ metadata {
         capability "Actuator"
         capability "Sensor"
         capability "Refresh"
+        capability "Battery"
 
         attribute "batteryCharging",       "string"
         attribute "dustbagFull",           "string"
         attribute "stickBleConnected",     "string"
         attribute "dischargingTime",       "string"
-        attribute "battery",               "string"
         attribute "cleanstationStatus",    "string"   // diagnostic
         attribute "dustbagUsage",          "number"   // diagnostic
         attribute "stickCleaningStatus",   "string"
@@ -53,7 +59,8 @@ metadata {
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -63,32 +70,32 @@ metadata {
 /** Library hook: no HubiThings Replica driver to match for this type. */
 Map attrRenames() { return [:] }
 
-void installed() { log.info "${device.displayName} installed" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
 
-void updated() { log.info "${device.displayName} updated" }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}, scope=${e.scope}) = ${e.state}"
+    beginEntity(e)
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
-        emitSelect(e, e.scope == "main" ? "" : cap(e.scope as String))
+        emitSelect(e, scopePrefix(e))
         return
     }
     if (e.scope != "main") {
-        emitGeneric(e, e.scope as String)
+        emitGeneric(e, scopePrefix(e))
         return
     }
 
     switch (e.suffix) {
-        // no suffix needs special handling on this type
+        case "battery":
+            emitBattery(e)
+            return
         default:
             emitGeneric(e)
     }
 }
-
-private String cap(String s) { return s ? s[0].toUpperCase() + s.substring(1) : s }
 
 // --- commands ---------------------------------------------------------------
 

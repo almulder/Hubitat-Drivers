@@ -11,8 +11,19 @@
  *  Attribute names follow the HubiThings Replica Samsung Refrigerator driver
  *  where it has one; see attrRenames().
  *
- *  Version: 0.6.1
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - Temperatures and setpoints are converted to the hub's scale, and setpoint commands convert back.
+ *    - Changing the primary compartment updates temperature and coolingSetpoint straight away.
+ *    - setFlexZoneMode and setPantryZoneMode take any mode this fridge offers, not one model's list; setSelectOption for any other select.
+ *    - energy is in kWh, Hubitat's EnergyMeter unit; LocalThings' Wh is converted. The other energy readings too.
+ *    - setRapidCooling and setRapidFreezing take Off/On like the other drivers; on and off still work.
+ *    - A subdevice entity lands on its own subdevice1-prefixed attribute instead of overwriting the main one.
+ *    - A compartment door reported on a subdevice still counts toward contact.
+ *    - Setpoints are refused, not sent unconverted, until the appliance has reported its unit.
  */
 
 metadata {
@@ -61,23 +72,23 @@ metadata {
         command "setCoolerSetpoint",  [[name: "Temperature*", type: "NUMBER"]]
         command "setFreezerSetpoint", [[name: "Temperature*", type: "NUMBER"]]
         command "setCoolingSetpoint", [[name: "Temperature*", type: "NUMBER", description: "Sets the compartment chosen under Preferences"]]
-        command "setRapidCooling",  [[name: "Rapid Cooling*",  type: "ENUM", constraints: ["on", "off"]]]
-        command "setRapidFreezing", [[name: "Rapid Freezing*", type: "ENUM", constraints: ["on", "off"]]]
+        command "setRapidCooling",  [[name: "Rapid Cooling*",  type: "ENUM", constraints: ["Off", "On"]]]
+        command "setRapidFreezing", [[name: "Rapid Freezing*", type: "ENUM", constraints: ["Off", "On"]]]
         command "cubedIceOn"
         command "cubedIceOff"
         command "iceBitesOn"
         command "iceBitesOff"
         command "resetWaterFilter"
-        // Home Assistant's names for this fridge's zones (TP2X_REF_20K, RF9000A
-        // flex zone and flex crisper). Hubitat builds a command dropdown only
-        // from a fixed list; the Listener turns the name back into the code.
-        command "setFlexZoneMode", [[name: "Mode*", type: "ENUM",
-            constraints: ["Freeze", "Soft freeze", "Meat/Fish", "Fruit & vegetables", "Beverage"]]]
-        command "setPantryZoneMode", [[name: "Mode*", type: "ENUM",
-            constraints: ["Fridge", "Meat/Fish"]]]
+        // Free text, like every other select: zone modes differ by model, and
+        // a fixed dropdown could only list one model's. The listener turns the
+        // name back into the code.
+        command "setFlexZoneMode", [[name: "Mode*", type: "STRING", description: "See the 'Flex Zone Mode' state variable for this appliance's options"]]
+        command "setPantryZoneMode", [[name: "Mode*", type: "STRING", description: "See the 'Pantry Zone Mode' state variable for this appliance's options"]]
         command "setAutofillPitcher", [[name: "Autofill pitcher*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setDefrostDelay", [[name: "Defrost delay*", type: "ENUM", constraints: ["Off", "On"]]]
         command "setSabbathMode", [[name: "Sabbath mode*", type: "ENUM", constraints: ["Off", "On"]]]
+        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
+                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
@@ -86,7 +97,8 @@ metadata {
               options: ["cooler": "Fridge compartment", "freezer": "Freezer compartment"]
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -102,13 +114,49 @@ Map attrRenames() {
     ]
 }
 
-void installed() { log.info "${device.displayName} installed" }
-void updated() { log.info "${device.displayName} updated" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
+void updated() {
+    log.info "${device.displayName} updated"
+    commonUpdated()
+    followPrimaryCompartment()
+}
+
+void uninstalled() { commonUninstalled() }
+
+/**
+ * temperature and coolingSetpoint follow the compartment chosen under
+ * Preferences. Copy that compartment's current readings across now, rather
+ * than leaving the other compartment's until this one next changes -- a
+ * settled fridge can go hours without a new reading.
+ */
+private void followPrimaryCompartment() {
+    String c = primaryCompartment()
+    def t  = device.currentValue("${c}Temperature")
+    def sp = device.currentValue("${c}Setpoint")
+    String unit = "°${hubTempScale()}"
+    if (t != null)  emit("temperature", t, [unit: unit])
+    if (sp != null) emit("coolingSetpoint", sp, [unit: unit])
+}
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}) = ${e.state}"
+    beginEntity(e)
+
+    // A subdevice reading gets its scope as a prefix, so it can never
+    // overwrite the main attribute of the same name.
+    String scope = scopePrefix(e)
+    if (scope) {
+        if (e.domain == "select") {
+            rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
+            emitSelect(e, scope)
+            return
+        }
+        String attr = emitGeneric(e, scope)
+        // A compartment door on a subdevice still counts toward `contact`.
+        if (attr && e.domain == "binary_sensor" && e.suffix?.toString()?.startsWith("door") && !isNullState(e.state)) {
+            updateAggregateDoor(attr, openClosed(e.state))
+        }
+        return
+    }
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
         emitSelect(e, "")
@@ -133,22 +181,14 @@ void parseEntity(Map e) {
 
         case "cooler_temperature":
         case "freezer_temperature":
-            if (isNullState(e.state)) return
-            String attr = snakeToCamel((String) e.suffix)
-            def v = coerce(e.state)
-            emit(attr, v, [unit: "°${location.temperatureScale}"])
-            String want = primaryCompartment() + "_temperature"
-            if (e.suffix == want) emit("temperature", v, [unit: "°${location.temperatureScale}"])
+            emitTemperature(snakeToCamel((String) e.suffix), e)
+            if (e.suffix == primaryCompartment() + "_temperature") emitTemperature("temperature", e)
             return
 
         case "cooler_setpoint":
         case "freezer_setpoint":
-            if (isNullState(e.state)) return
-            def sp = coerce(e.state)
-            emit(snakeToCamel((String) e.suffix), sp, [unit: "°${location.temperatureScale}"])
-            if (e.suffix == primaryCompartment() + "_setpoint") {
-                emit("coolingSetpoint", sp, [unit: "°${location.temperatureScale}"])
-            }
+            emitTemperature(snakeToCamel((String) e.suffix), e)
+            if (e.suffix == primaryCompartment() + "_setpoint") emitTemperature("coolingSetpoint", e)
             return
         case "power":
             if (!isNullState(e.state)) emit("power", coerce(e.state), [unit: e.unit ?: "W"])
@@ -159,9 +199,7 @@ void parseEntity(Map e) {
         case "energy_this_month":
         case "energy_last_month":
         case "power_energy":
-            if (!isNullState(e.state)) {
-                emit(snakeToCamel((String) e.suffix), coerce(e.state), [unit: e.unit ?: "Wh"])
-            }
+            emitEnergy(snakeToCamel((String) e.suffix), e)
             return
 
         default:
@@ -187,11 +225,11 @@ private void updateAggregateDoor(String attr, String value) {
     emit("contact", anyOpen ? "open" : "closed")
 }
 
-void setCoolerSetpoint(BigDecimal t)  { haSetNumber("cooler_setpoint", t) }
-void setFreezerSetpoint(BigDecimal t) { haSetNumber("freezer_setpoint", t) }
+void setCoolerSetpoint(BigDecimal t)  { haSetTemperature("cooler_setpoint", t) }
+void setFreezerSetpoint(BigDecimal t) { haSetTemperature("freezer_setpoint", t) }
 
 /** Replica: the main device's setpoint is the primary compartment's. */
-void setCoolingSetpoint(BigDecimal t) { haSetNumber(primaryCompartment() + "_setpoint", t) }
+void setCoolingSetpoint(BigDecimal t) { haSetTemperature(primaryCompartment() + "_setpoint", t) }
 
 void setRapidCooling(String v)  { setSwitchOption("rapid_fridge", v) }
 void setRapidFreezing(String v) { setSwitchOption("rapid_freezing", v) }

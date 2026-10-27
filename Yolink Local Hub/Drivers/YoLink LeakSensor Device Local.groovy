@@ -2,13 +2,18 @@
  *  YoLink™ Leak Sensor (Local API Edition)
  *  © 2025 Albert Mulder
  *
+ *  1.2.0 - Audit fixes: a message without a leak state no longer clears an active wet alarm (only
+ *          "alert"/"normal" change water); battery 0 now reports 0% and a message without a battery reading
+ *          leaves battery unchanged; no forced isStateChange events; new device token accepted from the app
+ *          (setDeviceToken); broker credentials no longer stored; no extra poll on app save; debug logging
+ *          turns itself off after 30 minutes.
  *  1.1.2 - Updated fro HPM
  *  1.1.1 - Harden the beginning of processStateData(String payload) to coerce/guard data and loraInfo before dereferencing.
  *  1.1.0 - Initial working driver
  */
 import groovy.json.JsonSlurper
 
-def clientVersion() { "1.1.2" }
+def clientVersion() { "1.2.0" }
 def copyright()     { "© 2025 Albert Mulder" }
 def driverName()    { "YoLink™ Leak Sensor (Local API Edition)" }
 
@@ -22,7 +27,7 @@ preferences {
                           <b>Temperature Scale:</b> ${activeScale()}<br>
                           <b>Date/Time Format:</b> ${activeFmt()}<br><br>
                           ${copyright()}"""
-    input name: "debug", type: "bool", title: "Enable debug logging", defaultValue: false
+    input name: "debug", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
 }
 
 /* ============================== Metadata ============================= */
@@ -74,15 +79,30 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, loca
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP
-    state.clientId     = clientId
-    state.clientSecret = clientSecret
+    state.remove("clientId")       // broker credentials are only needed by the MQTT Listener
+    state.remove("clientSecret")
     rememberState("devId", devId)
 
     logDebug("ServiceSetup: DNI=${state.my_dni}, Device Id=${state.devId}, HubIP=${state.localHubIP}, TokenSet=${!!state.token}")
-    reset()
+    state.driverVersion = clientVersion()  // keep local only
+    // No poll here: the app runs a reconcile right after setup, which polls every device once
 }
 
 boolean isSetup() { (state.devId && state.token) }
+
+// Called by the app when the Local Hub issues a new device token
+void setDeviceToken(token) {
+    if (token && state.token != token) {
+        state.token = token
+        logDebug("Device token updated")
+    }
+}
+
+void logsOff() {
+    log.warn "${device.displayName}: debug logging disabled"
+    device.updateSetting("debug", [value: "false", type: "bool"])
+    state.debug = false
+}
 
 def installed() {
     state.driverVersion = clientVersion() // keep in state only; do NOT sendEvent
@@ -92,6 +112,7 @@ def installed() {
 def updated() {
     state.debug = (settings?.debug == true)
     state.driverVersion = clientVersion() // keep in state only; do NOT sendEvent
+    if (state.debug) runIn(1800, "logsOff")
 }
 
 def uninstalled() {
@@ -113,8 +134,9 @@ def poll(force = null) {
 def refresh() { poll(true) }
 
 def pollDevice(delay=1) {
+    state.lastPollMs = now()
     runIn((delay ?: 1) as int, "getDevicestate")
-    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone), isStateChange: true)
+    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone))
 }
 
 /* ========================= Local API Interaction ===================== */
@@ -127,6 +149,8 @@ def getDevicestate() {
             token       : state.token
         ]
         def object = parent.pollAPI(request, state.name ?: "LeakSensor", state.type ?: "LeakSensor")
+        String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
+        if (latestToken && latestToken != state.token) state.token = latestToken
         if (object) {
             if (successful(object)) {
                 parseDevice(object)
@@ -157,12 +181,11 @@ private void parseDevice(object) {
 
     // Raw/state
     String rawState   = st?.state              // "normal" | "alert"
-    String waterState = (rawState == "alert") ? "wet" : "dry"
-    String swState    = (waterState == "wet") ? "on" : "off"
+    String waterState = waterFromState(rawState)
 
     // Battery & firmware
-    Integer batt4     = (st?.battery as Integer) ?: 0
-    Integer battery   = parent?.batterylevel(batt4 as String)
+    def     batt4     = st?.battery
+    Integer battery   = parent?.batterylevel(batt4)
     String  fw        = st?.version?.toUpperCase()
     String  bType     = st?.batteryType
 
@@ -182,9 +205,7 @@ private void parseDevice(object) {
     def reportAt      = data?.reportAt
 
     // Emit
-    rememberState("state", rawState)
-    rememberState("water", waterState)
-    rememberState("switch", swState)
+    updateWater(rawState, waterState)
     if (battery != null) rememberBatteryState(battery as int, true)
     if (fw) rememberState("firmware", fw)
     if (bType) rememberState("batteryType", bType)
@@ -195,12 +216,12 @@ private void parseDevice(object) {
 
     if (devTempC != null) {
         def t = convertCToPreferred(devTempC)
-        sendEvent(name: "temperature", value: t, unit: activeScale(), isStateChange: true)
+        sendEvent(name: "temperature", value: t, unit: activeScale())
     }
 
     if (reportAt) rememberState("reportAt", fmtTs(reportAt))
     if (devNetType) rememberState("loraDevNetType", devNetType)
-    if (signal != null) sendEvent(name: "signal", value: "${signal} dBm", isStateChange: true)
+    if (signal != null) sendEvent(name: "signal", value: "${signal} dBm")
     if (gateways != null) rememberState("gateways", gateways as int)
     if (gatewayId != null) rememberState("gatewayId", gatewayId)
 
@@ -228,12 +249,10 @@ def processStateData(String payload) {
         String eventType = (root?.event ?: "").replace("${state.type}.", "")
 
         String rawState   = (stateMap?.state instanceof String) ? stateMap.state : (data?.state instanceof String ? data.state : null)
-        String waterState = (rawState == "alert") ? "wet" : "dry"
-        String swState    = (waterState == "wet") ? "on" : "off"
+        String waterState = waterFromState(rawState)
 
-        Integer batt4   = (data?.battery != null) ? (data.battery as Integer)
-                          : (stateMap?.battery != null ? (stateMap.battery as Integer) : null)
-        Integer battery = (batt4 != null) ? parent?.batterylevel(batt4 as String) : null
+        def     batt4   = (data?.battery != null) ? data.battery : stateMap?.battery
+        Integer battery = parent?.batterylevel(batt4)
 
         String fw       = ((data?.version ?: stateMap?.version) ?: "").toString()?.toUpperCase()
         String bType    = (data?.batteryType != null) ? data.batteryType?.toString()
@@ -249,9 +268,7 @@ def processStateData(String payload) {
         def gateways   = lora?.gateways
         def devNetType = lora?.devNetType
 
-        rememberState("state", rawState)
-        rememberState("water", waterState)
-        rememberState("switch", swState)
+        updateWater(rawState, waterState)
 
         if (battery != null) rememberBatteryState(battery as int, (eventType == "Alert"))
         if (fw) rememberState("firmware", fw)
@@ -263,14 +280,14 @@ def processStateData(String payload) {
 
         if (devTempC != null) {
             def t = convertCToPreferred(devTempC)
-            sendEvent(name: "temperature", value: t, unit: activeScale(), isStateChange: true)
+            sendEvent(name: "temperature", value: t, unit: activeScale())
         }
 
         if (reportAt)  rememberState("reportAt", fmtTs(reportAt))
         if (changedAt) rememberState("stateChangedAt", fmtTs(changedAt))
 
         if (devNetType) rememberState("loraDevNetType", devNetType)
-        if (signal != null) sendEvent(name: "signal", value: "${signal} dBm", isStateChange: true)
+        if (signal != null) sendEvent(name: "signal", value: "${signal} dBm")
         if (gateways != null) rememberState("gateways", gateways as int)
         if (gatewayId != null) rememberState("gatewayId", gatewayId)
 
@@ -290,30 +307,31 @@ def reset() {
     poll(true)
 }
 
-def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value", isStateChange: true) }
+def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value") }
 
 def rememberState(name, value, unit=null) {
     if (state."$name" != value) {
         state."$name" = value
         if (unit) {
-            sendEvent(name: "$name", value: "$value", unit: "$unit", isStateChange: true)
+            sendEvent(name: "$name", value: "$value", unit: "$unit")
         } else {
-            sendEvent(name: "$name", value: "$value", isStateChange: true)
+            sendEvent(name: "$name", value: "$value")
         }
     }
 }
 
 def rememberBatteryState(def value, boolean forceSend = false) {
+    if (value == null) return            // no reading in this message: leave battery as is
     if (state.battery != value || forceSend) {
         state.battery = value
-        sendEvent(name: "battery", value: value?.toString(), unit: "%", isStateChange: true)
+        sendEvent(name: "battery", value: value?.toString(), unit: "%")
         logDebug("rememberBatteryState: battery => ${value}% (forceSend=${forceSend})")
     }
 }
 
 /* === Formatting helpers (pulled from parent app) === */
 private String activeFmt() { parent?.getDateTimeFormat() ?: "MM/dd/yyyy hh:mm:ss a" }
-private String activeScale() { parent?.temperatureScale() ?: "C" }
+private String activeScale() { parent?.temperatureScale() ?: "F" }
 
 private String fmtTs(def ts) {
     String f = activeFmt()
@@ -363,3 +381,23 @@ def logDebug(msg) { if (state.debug == true) log.debug msg }
 
 /* Tolerate parent's generic temperatureScale() ping; driver follows parent */
 def temperatureScale(String scale) { /* no-op */ }
+
+/* "alert" => wet, "normal" => dry, anything else (incl. missing) => null so the alarm is not cleared */
+private String waterFromState(String raw) {
+    switch (raw?.toLowerCase()) {
+        case "alert":  return "wet"
+        case "normal": return "dry"
+        default:       return null
+    }
+}
+
+/* Only touch water/switch when the message actually carried a leak state */
+private void updateWater(String rawState, String waterState) {
+    if (rawState) rememberState("state", rawState)
+    if (waterState) {
+        rememberState("water", waterState)
+        rememberState("switch", (waterState == "wet") ? "on" : "off")
+    } else if (rawState) {
+        logDebug("Unrecognised leak state '${rawState}'; water left unchanged")
+    }
+}

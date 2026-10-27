@@ -8,11 +8,14 @@
  * touch button, and the nightlight for that unit live as attributes/commands on
  * this single device.
  *
- * OUTLETS / NIGHTLIGHT - controlled explicitly by name, no ambiguous on()/off():
+ * OUTLETS / NIGHTLIGHT - outlets are controlled explicitly by name:
  *   - outlet1On() / outlet1Off()
  *   - outlet2On() / outlet2Off()
  *   - nightlightOn() / nightlightOff()
- *   - setLevel(0-100) dims the nightlight, if it supports dimming.
+ *   - on() / off() (standard Switch capability) control the NIGHTLIGHT only, never the
+ *     outlets - so dashboards and "turn on/off" rule actions can drive the light that
+ *     setLevel() already dims.
+ *   - setLevel(0-100) dims the nightlight, if it supports dimming; 0 turns it off.
  *   (Named "1"/"2" rather than top/bottom so it stays correct even if the unit
  *   is installed upside down, and matches the touch buttons' own numbering.)
  *
@@ -44,8 +47,13 @@
  * fixed on/off or active/inactive text.
  * 2.0.0 - Version alignment with the App and Listener's coordinated 2.0.0 release - no
  * functional changes in this file.
+ * 2.1.0 - Code-audit fixes: added the Switch capability (on()/off() and the "switch"
+ * attribute follow the nightlight). markPending() now only stamps the outlet/nightlight
+ * attributes (whose declared values now include "pending"), never motion/presence,
+ * level or numeric sensors. Outlet/nightlight info logging only fires on an actual
+ * change.
  */
-def clientVersion() { "2.0.0" }
+def clientVersion() { "2.1.0" }
 private def copyright() { return "<br>© 2026-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved." }
 def driverName() { "InvisOutlet Pro" }
 def activeScale() { (parent?.getTemperatureScale() == "F") ? "Fahrenheit (°F)" : "Celsius (°C)" }
@@ -53,6 +61,7 @@ def activeMeasurementScale() { (parent?.getDistanceUnit() == "in") ? "Inches (in
 
 metadata {
     definition(name: "InvisOutlet Pro", namespace: "almulder", author: "Albert Mulder") {
+        capability "Switch"
         capability "SwitchLevel"
         capability "TemperatureMeasurement"
         capability "RelativeHumidityMeasurement"
@@ -72,9 +81,10 @@ metadata {
 
         // Explicitly declared (rather than just sendEvent'd ad hoc) so webCoRE and
         // other tools that read a device's declared attribute list can see them.
-        attribute "outlet1", "enum", ["on", "off"]
-        attribute "outlet2", "enum", ["on", "off"]
-        attribute "nightlight", "enum", ["on", "off"]
+        // "pending" only appears on a brand-new device, until its first real value.
+        attribute "outlet1", "enum", ["on", "off", "pending"]
+        attribute "outlet2", "enum", ["on", "off", "pending"]
+        attribute "nightlight", "enum", ["on", "off", "pending"]
         attribute "airQualityIndex", "number"
         attribute "co2", "number"
         attribute "distance", "number"
@@ -124,6 +134,10 @@ def outlet2Off() { sendSwitch("outlet2", false) }
 def nightlightOn() { sendSwitch("nightlight", true) }
 def nightlightOff() { sendSwitch("nightlight", false) }
 
+// Switch capability - the nightlight, never the outlets.
+def on() { nightlightOn() }
+def off() { nightlightOff() }
+
 private sendSwitch(String attrName, boolean turnOn) {
     if (logEnable) log.debug "${device.displayName}: requesting ${turnOn ? 'ON' : 'OFF'} for '${attrName}'"
     parent?.sendSwitchCommand(device, attrName, turnOn)
@@ -153,8 +167,12 @@ def updateEntity(String attrName, String platform, deviceClass, value, unit = nu
             def stateText = value ? "on" : "off"
             def label = friendlyOutletLabel(attrName)
             def descriptionText = "${device.displayName} ${label} turned ${stateText}"
-            log.info descriptionText
+            // The Listener re-sends unchanged values now and then to stay in sync - only
+            // an actual change is worth an info line.
+            if (device.currentValue(attrName) != stateText) log.info descriptionText
             sendEvent(name: attrName, value: stateText, descriptionText: descriptionText)
+            // The light also drives the standard Switch capability.
+            if (attrName == "nightlight") sendEvent(name: "switch", value: stateText, descriptionText: descriptionText)
             break
         case "binary_sensor":
             if (deviceClass == "motion") {
@@ -189,27 +207,14 @@ def updateLevel(level) {
     sendEvent(name: "level", value: level)
 }
 
-// Called by the app right after this device is created, to stamp a "pending"
-// placeholder on every attribute the app knows this specific unit has - unlike
-// updateEntity() above, this does NOT collapse the value into fixed on/off or
-// active/inactive text, since "pending" needs to actually be visible as-is.
+// Called by the app right after this device is first created, to stamp a "pending"
+// placeholder until the first real value arrives (the Listener replays known values a
+// couple of seconds later). 2.1.0: only on the outlet/nightlight attributes, whose
+// declared values include "pending" - not on capability attributes with a fixed value
+// set (motion, presence, switch), number attributes (level, temperature, ...) or buttons.
 def markPending(String attrName, String platform, deviceClass) {
-    switch (platform) {
-        case "switch":
-        case "light":
-            sendEvent(name: attrName, value: "pending")
-            break
-        case "binary_sensor":
-            if (deviceClass == "motion") {
-                sendEvent(name: "motion", value: "pending")
-            } else if (deviceClass == "occupancy") {
-                sendEvent(name: "presence", value: "pending")
-            } else {
-                sendEvent(name: attrName, value: "pending")
-            }
-            break
-        default:
-            sendEvent(name: attrName, value: "pending")
+    if (platform in ["switch", "light"] && attrName in ["outlet1", "outlet2", "nightlight"]) {
+        sendEvent(name: attrName, value: "pending")
     }
 }
 

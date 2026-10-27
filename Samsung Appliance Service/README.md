@@ -18,21 +18,22 @@ separate devices.
 
 ---
 
-## ⏳ Get your credentials before 30 September 2026
+## ⏳ Getting credentials: SmartThings API access is no longer free
 
-**This is the part that expires.**
+**This is the part that may cost money or no longer be possible.**
 
 LocalThings talks to your appliances locally, but obtaining the client
-certificate for an appliance goes through Samsung's SmartThings API. Samsung
-begins charging for SmartThings API access in **October 2026** — it is free
-through **30 September 2026**.
+certificate for an appliance goes through Samsung's SmartThings API. Access
+to that API was free through **30 September 2026**; Samsung began charging
+for it in **October 2026**.
 
-Nobody knows yet whether certificates can still be minted afterwards, at what
-price, or on what terms. If you intend to use this — or think you might —
-**set up LocalThings and mint your certificates before that date.**
+If you minted your certificates before then, you are set: they keep working,
+survive appliance resets and do not need regenerating.
 
-Once minted, they keep working: they survive appliance resets and do not need
-regenerating. The expensive step is getting them in the first place.
+If you have not, check Samsung's current SmartThings API terms and the
+[LocalThings](https://github.com/mbillow/localthings) project before you
+start — whether certificates can still be minted, at what price and on what
+terms, is up to Samsung, and this package cannot help with that step.
 
 Two related notes:
 
@@ -77,13 +78,65 @@ without it.
 2. **Drivers code** → *New Driver* → paste `Drivers/SAS - Samsung Appliance Listener.groovy`
 3. **Drivers code** → paste each `Drivers/SAS - Samsung <appliance>.groovy` you need
 4. **Apps code** → *New App* → paste `App/SAS - Samsung Appliance Service.groovy`
-5. **Integrations** → *Add User App* → **SAS - Samsung Appliance Service**
+5. **Integrations** → *Add user integration* → **SAS - Samsung Appliance Service**
 
 Then enter your Home Assistant IP, port and token, press **Test connection**,
 open **Find and select appliances**, tick the ones you want, and press Done.
 
 The IP field wants a bare address like `192.168.1.158`. Paste a full URL and it
 strips the scheme, path and port for you.
+
+This package is not in Hubitat Package Manager yet: HPM installs apps and
+drivers but the shared library has to ship as a Hubitat bundle, which is still
+to be published. Until then, install by hand as above.
+
+**Upgrading:** update the library first, then the listener and the appliance
+drivers, then the app. Open each appliance device and press **Save
+Preferences** once, so its debug logging picks up the 30-minute auto-off.
+
+### ⚠️ Breaking changes in this release
+
+Check any rule, dashboard or webCoRE piston that uses these before upgrading:
+
+- **Energy is now in kWh, 1000× smaller than before.** LocalThings reports Wh;
+  the drivers now convert to kWh, Hubitat's EnergyMeter unit.
+  - Dishwasher, Dryer, Microwave: `energy`
+  - Washer: `energy`, `energySaved`
+  - Refrigerator: `energy`, `energySaved`, `energyThisMonth`,
+    `energyLastMonth`, `powerEnergy`
+- **Temperatures are converted to your hub's scale**, and every setpoint command
+  takes a value in your hub's scale. Before, values were passed through and
+  only the label changed. A setpoint command is refused, with a warning in the
+  log, until the appliance has reported which unit it uses.
+- **Air Conditioner:** `temperature` is now the room reading. The outdoor
+  reading that used to be there is now `outdoorTemperature`. The air
+  conditioner also gains Switch: `on`, `off` and `setClimateMode` drive it.
+- **Induction Cooktop:** `temperature` is now the probe's reading. The probe's
+  target, which used to be there, is now `probeTargetTemperature`.
+- **Air Monitor, Vacuum Station:** `battery` is a number with the Battery
+  capability, not a string.
+- **Dishwasher:** `filterUsage` is a number.
+- **Cooktop:** `mainTimerState` is a string.
+- **Subdevice attributes:** a subdevice's selects are named like its other
+  readings, `subdevice1CookingMode` rather than `Subdevice1CookingMode`. On the
+  Washer, Dryer, Dishwasher, Refrigerator and Microwave, a subdevice reading now
+  gets its own `subdevice1…` attribute instead of overwriting the main one.
+- **Refrigerator:** `setFlexZoneMode` and `setPantryZoneMode` take free text,
+  any mode this fridge offers, instead of one model's fixed list.
+  `setRapidCooling` and `setRapidFreezing` offer Off/On; on and off still work.
+- **Debug logging is off by default** on every device and turns itself off
+  30 minutes after you enable it.
+
+**The token must belong to a Home Assistant administrator.** The listener reads
+the device and entity registries and subscribes to your appliances' state
+changes, which Home Assistant only allows administrators to do.
+
+If Home Assistant rejects the token, the listener stops trying until you
+change the token in the app or press **Reconnect** on the listener device.
+Retrying a bad token every few minutes would fill Home Assistant's log and, if
+`ip_ban_enabled` is on, get the hub's address banned — after which even the
+corrected token is refused until you remove the ban from
+`ip_bans.yaml`.
 
 ---
 
@@ -191,13 +244,22 @@ Things that look like bugs and are not:
 
 ## Limitations
 
-- Air conditioner and heat pump also expose `climate` / `water_heater`
-  entities. Their state is reported, but setting them needs service helpers
-  that do not exist yet.
+- The air conditioner's power and HVAC mode can be set; its setpoints and fan
+  modes cannot yet. The heat pump's `water_heater` mode is reported as
+  `waterHeaterMode` but cannot be set yet.
 - Diagnostic entities are hidden by default; there is a toggle in the app.
-- The `energy` sensors arrive with no unit. Values look like Wh and are passed
-  through unchanged — confirm against your appliance before building cost
-  calculations on them.
+  Turning it off removes the diagnostic attributes already on the devices.
+- Temperatures are converted to your hub's scale. A setpoint command takes a
+  value in your hub's scale too, and is converted to the appliance's unit
+  (rounded to a whole degree) before it is sent. Until the appliance has
+  reported its unit, the command is refused rather than guessed, and an oven
+  `start` with a setpoint does not press Start.
+- Device names with accented or non-Latin letters will not route: Home
+  Assistant transliterates them when building entity ids, and Hubitat has no
+  equivalent. LocalThings names devices in English, so this should not arise.
+- Energy readings are converted to kWh. LocalThings sends Wh, or no unit at
+  all, in which case Wh is assumed — confirm against your appliance before
+  building cost calculations on them.
 
 ---
 

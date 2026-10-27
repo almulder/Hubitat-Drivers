@@ -2,13 +2,19 @@
  *  YoLink™ Power Failure Alarm (Local API Edition)
  *  © 2025 Albert Mulder
  *
+ *  1.2.0 - Audit fixes: a message without power info no longer reports mains/switch off during an outage;
+ *          reset no longer forces "mains"; battery uses the shared mapping; added reset command and MQTT
+ *          lastResponse; battery 0 now reports 0% and a message without a battery reading leaves battery
+ *          unchanged; no forced isStateChange events; new device token accepted from the app
+ *          (setDeviceToken); broker credentials no longer stored; no extra poll on app save; debug logging
+ *          turns itself off after 30 minutes.
  *  1.1.2 - Updated for HPM
  *  1.1.1 - Harden the beginning of processStateData(String payload) to coerce/guard data and loraInfo before dereferencing.
  *  1.1.0 - Initial working driver
  */
 import groovy.json.JsonSlurper
 
-def clientVersion() { "1.1.2" }
+def clientVersion() { "1.2.0" }
 def copyright()     { "© 2025 Albert Mulder" }
 def driverName()    { "YoLink™ Power Failure Alarm (Local API Edition)" }
 
@@ -21,7 +27,7 @@ preferences {
                           <b>Version:</b> v${clientVersion()}<br>
                           <b>Date/Time Format:</b> ${activeFmt()}<br><br>
                           ${copyright()}"""
-    input name: "debug", type: "bool", title: "Enable debug logging", defaultValue: false
+    input name: "debug", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
 }
 
 /* ============================== Metadata ============================= */
@@ -33,6 +39,8 @@ metadata {
         capability "Refresh"
         capability "Battery"
         capability "PowerSource"      // "mains" or "battery"
+
+        command "reset"
 
         attribute "online", "String"
         attribute "devId", "String"
@@ -62,15 +70,30 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId,
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP
-    state.clientId     = clientId
-    state.clientSecret = clientSecret
+    state.remove("clientId")       // broker credentials are only needed by the MQTT Listener
+    state.remove("clientSecret")
     rememberState("devId", devId)
 
     logDebug "ServiceSetup: DNI=${state.my_dni}, DeviceId=${state.devId}, HubIP=${state.localHubIP}, TokenSet=${!!state.token}"
-    reset()
+    state.driverVersion = clientVersion()  // keep local only
+    // No poll here: the app runs a reconcile right after setup, which polls every device once
 }
 
 boolean isSetup() { (state.devId && state.token) }
+
+// Called by the app when the Local Hub issues a new device token
+void setDeviceToken(token) {
+    if (token && state.token != token) {
+        state.token = token
+        logDebug("Device token updated")
+    }
+}
+
+void logsOff() {
+    log.warn "${device.displayName}: debug logging disabled"
+    device.updateSetting("debug", [value: "false", type: "bool"])
+    state.debug = false
+}
 
 def installed() {
     state.driverVersion = clientVersion() // keep in state only
@@ -80,6 +103,11 @@ def installed() {
 def updated() {
     state.debug = (settings?.debug == true)
     state.driverVersion = clientVersion() // keep in state only
+    if (state.debug) runIn(1800, "logsOff")
+}
+
+def uninstalled() {
+    log.warn "Device '${state.name}' removed"
 }
 
 /* ========================= Polling / Refresh ========================= */
@@ -97,9 +125,10 @@ def poll(force = null) {
 def refresh() { poll(true) }
 
 def pollDevice(delay=1) {
+    state.lastPollMs = now()
     // driverVersion stays in state (no event)
     runIn((delay ?: 1) as int, "getDevicestate")
-    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone), isStateChange: true)
+    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone))
 }
 
 /* ========================= Local API Interaction ===================== */
@@ -112,6 +141,8 @@ def getDevicestate() {
             token       : state.token
         ]
         def object = parent.pollAPI(request, state.name, state.type)
+        String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
+        if (latestToken && latestToken != state.token) state.token = latestToken
         if (object) {
             if (successful(object)) {
                 parseDevice(object)
@@ -137,29 +168,25 @@ private void parseDevice(object) {
     String  rawState  = st?.state                 // "normal"|"alert"|"off"
     String  alertType = st?.alertType
     Integer soundLvl  = (st?.sound as Integer)
-    Integer battery4  = (st?.battery as Integer) ?: 0
+    def     battery4  = st?.battery
     Boolean supply    = (st?.powerSupply instanceof Boolean) ? st.powerSupply : null
     Boolean beepOn    = (st?.beep instanceof Boolean)        ? st.beep        : null
     Boolean muteOn    = (st?.mute instanceof Boolean)        ? st.mute        : null
     String  fwVer     = st?.version
     def     reportAt  = data?.reportAt
 
-    Integer batteryPct = Math.min(100, Math.max(0, battery4 * 25))
-    boolean outage  = (rawState == "alert") || (supply == false)
-    String  powerSrc = outage ? "battery" : "mains"
-    String  swState  = outage ? "on" : "off"
+    Integer batteryPct = parent?.batterylevel(battery4)
+    String  powerSrc   = derivePowerSource(rawState, supply)
+    String  swState    = (powerSrc == null) ? null : (powerSrc == "battery" ? "on" : "off")
 
     if (reportAt) rememberState("reportAt", fmtTs(reportAt))
-    rememberState("state", rawState)
+    updatePower(rawState, supply, powerSrc)
     rememberBatteryState(batteryPct, true)
-    rememberState("powerSupply", (supply == null ? "" : supply.toString()))
-    rememberState("powerSource", powerSrc)
-    rememberState("switch", swState)
     if (fwVer)          rememberState("firmware", fwVer?.toUpperCase())
     if (alertType)      rememberState("alertType", alertType)
     if (beepOn != null) rememberState("beep",  beepOn.toString())
     if (muteOn != null) rememberState("mute",  muteOn.toString())
-    if (soundLvl != null) sendEvent(name: "sound", value: soundLvl, isStateChange: true)
+    if (soundLvl != null) sendEvent(name: "sound", value: soundLvl)
 
     logDebug("Parsed(getState): state=${rawState}, powerSupply=${supply}, powerSource=${powerSrc}, " +
              "switch=${swState}, battery=${batteryPct}%, sound=${soundLvl}, beep=${beepOn}, mute=${muteOn}, " +
@@ -172,7 +199,7 @@ def parse(topic) { processStateData(topic?.payload) }
 def processStateData(String payload) {
     try {
         def root = new JsonSlurper().parseText(payload)
-        if (state?.devId && root?.deviceId && state.devId != root.deviceId) return
+        if (!root?.deviceId || state.devId != root.deviceId) return
         rememberState("online", "true")
 
         // Normalize data/lora
@@ -184,58 +211,56 @@ def processStateData(String payload) {
         String  rawState  = st?.state
         String  alertType = st?.alertType
         Integer sound     = (st?.sound as Integer)
-        Integer batt4     = (st?.battery as Integer) ?: 0
+        def     batt4     = st?.battery
         Boolean supply    = (st?.powerSupply instanceof Boolean) ? st.powerSupply : null
         Boolean beepOn    = (st?.beep instanceof Boolean) ? st.beep : null
         Boolean muteOn    = (st?.mute instanceof Boolean) ? st.mute : null
         String  fwVer     = st?.version
         def     changedAt = st?.stateChangedAt
 
-        Integer batteryPct = Math.min(100, Math.max(0, batt4 * 25))
-        boolean outage  = (rawState == "alert") || (supply == false)
-        String  powerSrc = outage ? "battery" : "mains"
-        String  swState  = outage ? "on" : "off"
+        Integer batteryPct = parent?.batterylevel(batt4)
+        String  powerSrc   = derivePowerSource(rawState, supply)
 
-        rememberState("state", rawState)
-        rememberState("powerSupply", (supply == null ? "" : supply.toString()))
-        rememberState("powerSource", powerSrc)
-        rememberState("switch", swState)
+        updatePower(rawState, supply, powerSrc)
         rememberBatteryState(batteryPct, false)
         if (fwVer)          rememberState("firmware", fwVer?.toUpperCase())
         if (alertType)      rememberState("alertType", alertType)
         if (beepOn != null) rememberState("beep",  beepOn.toString())
         if (muteOn != null) rememberState("mute",  muteOn.toString())
-        if (sound != null)  sendEvent(name: "sound", value: sound, isStateChange: true)
+        if (sound != null)  sendEvent(name: "sound", value: sound)
         if (changedAt)      rememberState("stateChangedAt", fmtTs(changedAt))
+        lastResponse("MQTT Success")
     } catch (e) {
         log.warn "PFA processStateData error: ${e}"
+        lastResponse("MQTT Exception")
     }
 }
 
 
 /* ============================== Utilities ============================= */
 def reset() {
+    // Don't force powerSource/switch here: during an outage that told rules "power restored".
+    // The poll below reports the real state.
     state.driverVersion = clientVersion()  // keep local only
-    rememberState("powerSource", "mains")
-    rememberState("switch", "off")
     lastResponse("Reset completed")
     poll(true)
 }
 
-def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value", isStateChange: true) }
+def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value") }
 
 def rememberState(name, value, unit=null) {
     if (state."$name" != value) {
         state."$name" = value
-        if (unit) sendEvent(name: "$name", value: "$value", unit: "$unit", isStateChange: true)
-        else      sendEvent(name: "$name", value: "$value", isStateChange: true)
+        if (unit) sendEvent(name: "$name", value: "$value", unit: "$unit")
+        else      sendEvent(name: "$name", value: "$value")
     }
 }
 
 def rememberBatteryState(def value, boolean forceSend = false) {
+    if (value == null) return            // no reading in this message: leave battery as is
     if (state.battery != value || forceSend) {
         state.battery = value
-        sendEvent(name: "battery", value: value?.toString(), unit: "%", isStateChange: true)
+        sendEvent(name: "battery", value: value?.toString(), unit: "%")
         logDebug("rememberBatteryState: battery => ${value}% (forceSend=${forceSend})")
     }
 }
@@ -283,3 +308,20 @@ def logDebug(msg) { if (state.debug == true) log.debug msg }
 
 /* Ignore temperatureScale() broadcasts from parent app */
 def temperatureScale(String scale) { /* not applicable */ }
+
+/* "battery" during an outage, "mains" otherwise; null when the message says nothing about power */
+private String derivePowerSource(String rawState, Boolean supply) {
+    if (rawState == "alert" || supply == false) return "battery"
+    if (supply == true || rawState == "normal") return "mains"
+    return null
+}
+
+/* Only update the power fields the message actually carried */
+private void updatePower(String rawState, Boolean supply, String powerSrc) {
+    if (rawState)       rememberState("state", rawState)
+    if (supply != null) rememberState("powerSupply", supply.toString())
+    if (powerSrc) {
+        rememberState("powerSource", powerSrc)
+        rememberState("switch", (powerSrc == "battery") ? "on" : "off")
+    }
+}

@@ -5,11 +5,41 @@
  *  suffix mapping, per-attribute throttling with trailing flush, exact-value
  *  de-duplication, and Home Assistant service-call plumbing.
  *
- *  Version: 0.6.0
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
  *
  *  Install this library BEFORE the child drivers -- they will not compile
  *  without it.
+ *
+ *  0.7.0
+ *    - Trailing flush no longer delayed: one shared timer is only ever moved
+ *      EARLIER, so lastUpdate's 5 minute hold cannot push progressPercent back.
+ *    - A held value is dropped when a newer value is sent or matches the
+ *      current one, so a stale held value can no longer land after a newer one.
+ *    - power on/off is immediate; power as a wattage reading keeps the throttle.
+ *    - Throttle entries for the kWh, watts and progressPercentage names.
+ *    - Temperatures are converted to the hub scale: emitTemperature,
+ *      emitTemperatureValue, toHubTemperature, toEntityTemperature and
+ *      haSetTemperature. emitGeneric converts temperature sensors itself.
+ *    - Shared logsOff, scheduleLogsOff, commonInstalled and commonUpdated.
+ *    - capFirst replaces the per-driver cap helper.
+ *    - Throttle bookkeeping is kept in memory, not written to state per event.
+ *    - attrRenames is cached; coerce rejects NaN and Infinity; de-dup compares
+ *      numbers by value, so 21.5 and 21.50 are the same reading.
+ *    - pruneEntities lets the listener drop entities Home Assistant no longer has.
+ *    - applyDiagnosticsSetting removes diagnostic attributes when hidden.
+ *    - Driver helpers: scopePrefix, emitEnergy in kWh, emitBattery,
+ *      emitCarbonDioxide, suffixInDomain, and the Oven and Range cooking
+ *      helpers ovenStartCook, ovenSetCookMinutes, ovenCavityReady,
+ *      ovenNoteCavity and ovenCavityScope.
+ *    - beginEntity, the shared start of parseEntity; fanTarget; and
+ *      commonUninstalled, which drops a removed device's memory.
+ *    - A temperature entity's unit is remembered even before its first
+ *      reading, and a setpoint is refused rather than sent unconverted while
+ *      the unit is still unknown. ovenStartCook checks the time and setpoint
+ *      before sending anything, and never presses Start after a refusal.
+ *    - lastUpdate is sampled, not held, and select options are written to
+ *      state only when they change: two state writes fewer per event.
  *
  *  HubiThings Replica names: see that section below. NO round brackets in
  *  this header -- Hubitat finds the settings block by the first bracket
@@ -27,6 +57,7 @@ library(
 )
 
 import groovy.transform.Field
+import java.util.concurrent.ConcurrentHashMap
 
 // ---------------------------------------------------------------------------
 // Throttling policy
@@ -42,9 +73,10 @@ import groovy.transform.Field
 // Replica rename (the camelCased HA suffix), so one list serves every driver.
 
 // Attributes that must never be delayed: anything an automation triggers on.
-// NOTE: `power` is deliberately absent. It is a binary on/off on the washer
-// and dryer but a wattage meter on the refrigerator; the default throttle
-// suits both, since an infrequent toggle is never delayed anyway.
+// NOTE: `power` is not listed here because it means two things: an on/off
+// switch on the washer and dryer, renamed to `switch`, and a wattage meter on
+// the refrigerator. See VALUE_TYPED_ATTRS -- the toggle is immediate, the
+// reading keeps its THROTTLE_MS entry.
 @Field static final List<String> IMMEDIATE_ATTRS = [
     "switch", "contact", "door", "running", "machineState",
     "alarmCode", "childLock", "detergentLow", "softenerLow", "cavityState",
@@ -88,10 +120,38 @@ import groovy.transform.Field
     "lowerOvenTemperature"      : 5000,
     "lowerOvenSetpoint"         : 5000,
     "lowerOvenCookTime"         : 5000,
-    "lowerOvenOperationTime"    : 5000
+    "lowerOvenOperationTime"    : 5000,
+    // Names the generated drivers use for the same kinds of reading.
+    "energyKwh"           : 5000,
+    "energyThisMonthKwh"  : 5000,
+    "energyLastMonthKwh"  : 5000,
+    "energySavedKwh"      : 5000,
+    "powerEnergyKwh"      : 5000,
+    "powerWatts"          : 5000,
+    "progressPercentage"  : 5000,
+    "completionMinutes"   : 5000
 ]
 
+// Attributes whose throttle depends on the value: a non-numeric value (an
+// on/off toggle) is sent immediately, a number takes the THROTTLE_MS entry.
+@Field static final List<String> VALUE_TYPED_ATTRS = ["power"]
+
 @Field static final Integer DEFAULT_THROTTLE_MS = 2000
+
+// Attributes that are sampled rather than held: inside the window the value is
+// simply skipped, with no trailing flush. lastUpdate is only a heartbeat, and
+// holding it wrote state.pending on nearly every event.
+@Field static final List<String> SAMPLED_ATTRS = ["lastUpdate"]
+
+// When each attribute was last sent, per device. In memory rather than state:
+// writing state on every event was most of the cost of an event, and losing
+// this on a reboot only means one value goes out unthrottled.
+@Field static final ConcurrentHashMap<String, Map> LAST_SENT = new ConcurrentHashMap<String, Map>()
+
+// attrRenames() is a constant table per driver; building it for every event
+// was wasted work. Static fields belong to the driver class that includes
+// this library, so each driver type has its own cache.
+@Field static Map RENAMES_CACHE = null
 
 // HA states that mean "no reading", not a real value.
 @Field static final List<String> NULL_STATES = ["unknown", "unavailable", "none", "null", ""]
@@ -154,6 +214,15 @@ String snakeToCamel(String s) {
     return sb.toString()
 }
 
+/**
+ * "subdevice1" -> "Subdevice1". Shared replacement for the private cap()
+ * each generated driver used to carry; named differently so a driver that
+ * still has its own cap() keeps compiling.
+ */
+String capFirst(String s) {
+    return s ? s[0].toUpperCase() + s.substring(1) : s
+}
+
 // ---------------------------------------------------------------------------
 // Value coercion
 // ---------------------------------------------------------------------------
@@ -206,23 +275,174 @@ String openClosed(def v) {
     return (v?.toString()?.toLowerCase() in ["on", "true", "open", "1"]) ? "open" : "closed"
 }
 
-/** Return a Number when the state parses as one, otherwise the original String. */
+/**
+ * Return a Number when the state parses as one, otherwise the original String.
+ * "NaN" and "Infinity" parse as doubles but are not readings; they come back
+ * as null, which emit() ignores, rather than landing in a numeric attribute.
+ */
 def coerce(def v) {
     if (v == null) return null
     String s = v.toString()
     if (s.isInteger()) return s.toInteger()
-    if (s.isDouble())  return s.toDouble()
+    if (s.isDouble()) {
+        Double d = s.toDouble()
+        return (d.isNaN() || d.isInfinite()) ? null : d
+    }
     return s
+}
+
+private Boolean isNumeric(def v) {
+    if (v == null) return false
+    if (v instanceof Number) return true
+    return v.toString().isNumber()
+}
+
+// ---------------------------------------------------------------------------
+// Temperatures
+// ---------------------------------------------------------------------------
+//
+// Home Assistant reports each temperature in the entity's own unit, which
+// need not be the hub's: a fridge in Celsius on a Fahrenheit hub. Labelling
+// "3" as °F made a "temperature > 45" rule never fire. These convert on the
+// way in, and setpoint commands convert back on the way out using the unit
+// the entity last reported.
+
+/** "°C", "C", "celsius" -> "C"; "°F", "fahrenheit" -> "F"; anything else -> null. */
+String tempScaleOf(def unit) {
+    if (unit == null) return null
+    String u = unit.toString().toUpperCase().replace("°", "").trim()
+    if (u == "C" || u == "CELSIUS")    return "C"
+    if (u == "F" || u == "FAHRENHEIT") return "F"
+    return null
+}
+
+String hubTempScale() {
+    return (location?.temperatureScale ?: "F").toString().toUpperCase()
+}
+
+private def roundTemp(double v, int places) {
+    BigDecimal r = BigDecimal.valueOf(v).setScale(places, BigDecimal.ROUND_HALF_UP)
+    return (places == 0) ? r.intValue() : r
+}
+
+/**
+ * A reading in `fromUnit` as the hub's scale, to one decimal place. A value
+ * with no recognisable unit is assumed to already be in the hub's scale and
+ * passes through unchanged. Returns null when the value is not a number.
+ */
+def toHubTemperature(def value, def fromUnit) {
+    def n = (value instanceof Number) ? value : coerce(value)
+    if (!(n instanceof Number)) return null
+    String from = tempScaleOf(fromUnit)
+    String to   = hubTempScale()
+    if (!from || from == to) return n
+    double v = ((Number) n).doubleValue()
+    double out = (to == "F") ? (v * 9.0d / 5.0d + 32.0d) : ((v - 32.0d) * 5.0d / 9.0d)
+    return roundTemp(out, 1)
+}
+
+/** Remember the unit an entity reports in, so a command can convert back. */
+void rememberUnit(String scope, String suffix, def unit) {
+    if (suffix == null || unit == null) return
+    String key = "units_${scope ?: 'main'}"
+    Map m = (state[key] instanceof Map) ? (Map) state[key] : [:]
+    if (m[suffix] != unit.toString()) {
+        m[suffix] = unit.toString()
+        state[key] = m
+    }
+}
+
+String unitFor(String suffix, String scope = "main") {
+    Map m = (state["units_${scope ?: 'main'}"] instanceof Map) ? (Map) state["units_${scope ?: 'main'}"] : [:]
+    return m[suffix]
+}
+
+/**
+ * A hub-scale value, typically a setpoint from a command, in the unit the
+ * entity reports in. Converted values are rounded to whole degrees, which is
+ * what these appliances accept; an unconverted value passes through as given.
+ * If the entity has not reported a unit yet, the value is sent unchanged.
+ */
+def toEntityTemperature(def hubValue, String suffix, String scope = "main") {
+    def n = (hubValue instanceof Number) ? hubValue : coerce(hubValue)
+    if (!(n instanceof Number)) return hubValue
+    String to   = tempScaleOf(unitFor(suffix, scope))
+    String from = hubTempScale()
+    if (!to || to == from) return n
+    double v = ((Number) n).doubleValue()
+    double out = (to == "F") ? (v * 9.0d / 5.0d + 32.0d) : ((v - 32.0d) * 5.0d / 9.0d)
+    return roundTemp(out, 0)
+}
+
+/**
+ * number.set_value for a temperature entity, converting from the hub's scale.
+ * Refused, sending nothing, when the entity is unknown, the value is not a
+ * number, or the entity has not reported its unit yet: guessing the unit
+ * could set an oven to 350 C. Returns whether it was sent.
+ */
+boolean haSetTemperature(String suffix, def hubValue, String scope = "main") {
+    if (!entityFor(suffix, scope)) {
+        log.warn "${device.displayName}: no '${suffix}' entity known (scope=${scope}); setpoint not sent"
+        return false
+    }
+    def n = (hubValue instanceof Number) ? hubValue : coerce(hubValue)
+    if (!(n instanceof Number)) {
+        log.warn "${device.displayName}: '${hubValue}' is not a temperature; ${suffix} not set"
+        return false
+    }
+    if (!tempScaleOf(unitFor(suffix, scope))) {
+        log.warn "${device.displayName}: ${suffix} has not reported its unit yet, so ${hubValue} " +
+                 "can't be converted safely -- not sent. Try again after a refresh."
+        return false
+    }
+    haSetNumber(suffix, toEntityTemperature(n, suffix, scope), scope)
+    return true
+}
+
+/**
+ * Emit a temperature entity's state under `attr`, converted to the hub's scale
+ * and labelled with it. Nothing is sent when there is no reading.
+ */
+void emitTemperature(String attr, Map e, Map opts = [:]) {
+    if (attr == null || e == null) return
+    // Before the null check: an idle oven's setpoint reads "unknown" but still
+    // reports its unit, and a setpoint command needs that unit to convert.
+    rememberUnit((String) (e.scope ?: "main"), (String) e.suffix, e.unit)
+    if (isNullState(e.state)) { holdPrevious(attr, e.state); return }
+    emitTemperatureValue(attr, e.state, e.unit, opts)
+}
+
+/** As emitTemperature, for a value a driver has already picked out itself. */
+void emitTemperatureValue(String attr, def value, def fromUnit, Map opts = [:]) {
+    if (attr == null || isNullState(value)) return
+    def v = toHubTemperature(value, fromUnit)
+    if (v == null) return
+    Map o = [:]
+    if (opts) o.putAll(opts)
+    o.unit = "°${hubTempScale()}"
+    emit(attr, v, o)
 }
 
 // ---------------------------------------------------------------------------
 // Event emission: de-dup, then throttle with a trailing flush
 // ---------------------------------------------------------------------------
 
-private Integer throttleMsFor(String attr) {
+private Integer throttleMsFor(String attr, def value = null) {
     if (IMMEDIATE_ATTRS.contains(attr)) return 0
+    if (VALUE_TYPED_ATTRS.contains(attr) && value != null && !isNumeric(value)) return 0
     Integer ms = THROTTLE_MS[attr]
     return (ms != null) ? ms : DEFAULT_THROTTLE_MS
+}
+
+private Map lastSentMap() {
+    String k = device.id.toString()
+    Map m = LAST_SENT.get(k)
+    if (m == null) {
+        m = new ConcurrentHashMap()
+        Map prior = LAST_SENT.putIfAbsent(k, m)
+        if (prior != null) m = prior
+    }
+    return m
 }
 
 // ---------------------------------------------------------------------------
@@ -256,16 +476,22 @@ private Integer throttleMsFor(String attr) {
 
 private String pad2(int n) { return (n < 10 ? "0" : "") + n }
 
-private Map replicaRule(String attr) {
-    Map renames
+private Map renamesTable() {
+    Map c = RENAMES_CACHE
+    if (c != null) return c
     try {
-        renames = attrRenames()
+        c = attrRenames() ?: [:]
     } catch (Exception ignored) {
         // A driver from before 0.6.0 has no attrRenames(): keep its own names
         // rather than failing every event until it is updated.
-        return null
+        c = [:]
     }
-    def r = renames?.get(attr)
+    RENAMES_CACHE = c
+    return c
+}
+
+private Map replicaRule(String attr) {
+    def r = renamesTable().get(attr)
     if (r == null) return null
     return (r instanceof Map) ? (Map) r : [name: r.toString()]
 }
@@ -288,29 +514,18 @@ private Object replicaValue(Map rule, Object value) {
     return value
 }
 
-/** Exact-value dedup. A separate concern from time throttling. */
+/**
+ * Exact-value dedup. A separate concern from time throttling. Numbers compare
+ * by value, so a stored 21.5 and an incoming "21.50" are the same reading.
+ */
 private Boolean isDuplicateUpdate(String attr, def value) {
     def cur = device.currentValue(attr)
     if (cur == null && value == null) return true
-    if (cur == null) return false
-    return cur.toString() == value?.toString()
-}
-
-/**
- * Time throttle, keyed on attribute. Returns true when the caller should hold
- * off. A held value is stashed and flushed on a timer so the LAST value always
- * lands -- a plain drop would leave progressPercent frozen at 88 when a cycle
- * stops updating.
- */
-private Boolean isThrottled(String attr, String policy) {
-    Integer ms = throttleMsFor(policy)
-    if (ms <= 0) return false
-    Long nowMs = now()
-    Map last = (state.lastSentAt instanceof Map) ? state.lastSentAt : [:]
-    Long prev = (last[attr] != null) ? (last[attr] as Long) : null
-    if (prev != null && (nowMs - prev) < ms) return true
-    last[attr] = nowMs
-    state.lastSentAt = last
+    if (cur == null || value == null) return false
+    String a = cur.toString()
+    String b = value.toString()
+    if (a == b) return true
+    if (a.isNumber() && b.isNumber()) return new BigDecimal(a).compareTo(new BigDecimal(b)) == 0
     return false
 }
 
@@ -318,6 +533,12 @@ private Boolean isThrottled(String attr, String policy) {
  * Central event path. EVERY sendEvent in a child driver goes through here --
  * in the InvisOutlet Listener the paths that got missed were binary_sensor and
  * the generic numeric sensor branches.
+ *
+ * Throttling is per attribute with a trailing flush: a value inside its
+ * attribute's window is held and sent when the window ends, so the LAST value
+ * always lands -- a plain drop would leave progressPercent frozen at 88 when
+ * a cycle stops updating. A held value is discarded as soon as a newer value
+ * is sent or the current value already matches, so it can never land late.
  */
 void emit(String attr, def value, Map opts = [:]) {
     if (attr == null) return
@@ -330,35 +551,80 @@ void emit(String attr, def value, Map opts = [:]) {
         value = replicaValue(rule, value)
         if (rule.format == "hms") opts = (opts ?: [:]).findAll { k, v -> k != "unit" }
     }
-    if (isDuplicateUpdate(attr, value)) return
+    if (value == null) return
+    if (isDuplicateUpdate(attr, value)) { dropPending(attr); return }
 
-    if (isThrottled(attr, policy)) {
-        Map pending = (state.pending instanceof Map) ? state.pending : [:]
-        pending[attr] = [value: value, opts: opts]
-        state.pending = pending
-        Integer secs = Math.max(1, (int) Math.ceil(throttleMsFor(policy) / 1000.0d))
-        runIn(secs, "flushPending", [overwrite: true])
-        return
+    Integer ms = throttleMsFor(policy, value)
+    if (ms > 0) {
+        Map last = lastSentMap()
+        Long nowMs = now()
+        Long prev = (last[attr] != null) ? (last[attr] as Long) : null
+        if (prev != null && (nowMs - prev) < ms) {
+            if (!SAMPLED_ATTRS.contains(policy)) holdForFlush(attr, value, opts, prev + ms)
+            return
+        }
+        last[attr] = nowMs
     }
+    dropPending(attr)
     doSend(attr, value, opts)
 }
 
-// Invoked by name from runIn() in emit(), so nothing calls it directly --
-// leave it alone, a dead-code scan cannot see a scheduled call.
-void flushPending() {
-    Map pending = (state.pending instanceof Map) ? state.pending : [:]
-    if (!pending) return
-    state.pending = [:]
-    Map last = (state.lastSentAt instanceof Map) ? state.lastSentAt : [:]
+private void holdForFlush(String attr, def value, Map opts, Long dueMs) {
+    Map pending = (state.pending instanceof Map) ? (Map) state.pending : [:]
+    pending[attr] = [value: value, opts: (opts ?: [:]), due: dueMs]
+    state.pending = pending
+    scheduleFlush(dueMs)
+}
+
+/**
+ * One timer serves every held attribute, and it is only ever moved EARLIER.
+ * Overwriting it on every hold let lastUpdate's 5 minute window push a held
+ * progressPercent out by 5 minutes; flushPending() re-arms itself for
+ * whatever is still waiting, so a later due time never needs the timer.
+ */
+private void scheduleFlush(Long dueMs) {
     Long nowMs = now()
+    Long scheduled = (state.flushDueAt != null) ? (state.flushDueAt as Long) : null
+    // A timer more than a few seconds overdue was lost (a reboot): replace it.
+    if (scheduled != null && scheduled > nowMs - 5000L && scheduled <= dueMs) return
+    state.flushDueAt = dueMs
+    runInMillis(Math.max(250L, dueMs - nowMs), "flushPending", [overwrite: true])
+}
+
+private void dropPending(String attr) {
+    def p = state.pending
+    if (p instanceof Map && ((Map) p).containsKey(attr)) {
+        Map m = (Map) p
+        m.remove(attr)
+        state.pending = m
+    }
+}
+
+// Invoked by name from runInMillis() in scheduleFlush(), so nothing calls it
+// directly -- leave it alone, a dead-code scan cannot see a scheduled call.
+void flushPending() {
+    state.remove("flushDueAt")
+    if (state.lastSentAt != null) state.remove("lastSentAt")   // pre-0.7.0 bookkeeping
+    Map pending = (state.pending instanceof Map) ? (Map) state.pending : [:]
+    if (!pending) return
+    Long nowMs = now()
+    Map last = lastSentMap()
+    Map keep = [:]
     pending.each { String attr, def rec ->
         Map r = (Map) rec
+        // Entries held before 0.7.0 carry no due time: send them now.
+        Long due = (r.due != null) ? (r.due as Long) : 0L
+        if (due > nowMs + 250L) { keep[attr] = r; return }
         if (!isDuplicateUpdate(attr, r.value)) {
             last[attr] = nowMs
             doSend(attr, r.value, (Map) (r.opts ?: [:]))
         }
     }
-    state.lastSentAt = last
+    state.pending = keep
+    if (keep) {
+        Long next = (Long) keep.values().collect { Map r -> (r.due ?: nowMs) as Long }.min()
+        scheduleFlush(next)
+    }
 }
 
 private void doSend(String attr, def value, Map opts) {
@@ -411,8 +677,32 @@ void noteEntityHealth(Map e) {
     if (!gone) {
         emit("lastUpdate", new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
     }
-    emit("healthStatus", !missing ? "online"
-                                 : (missing.size() >= known.size() ? "offline" : "partial"))
+    emit("healthStatus", healthOf(known, missing))
+}
+
+private String healthOf(List known, List missing) {
+    return !missing ? "online" : (missing.size() >= known.size() ? "offline" : "partial")
+}
+
+/**
+ * Forget entities Home Assistant no longer has. The listener calls this after
+ * a full seed with every "scope:suffix" key it delivered to this device;
+ * without it an entity removed while unavailable kept healthStatus at
+ * "partial" for good.
+ */
+void pruneEntities(List keys) {
+    if (!(keys instanceof List) || !keys) return
+    Set live = keys.collect { it.toString() } as Set
+    List known   = (state.knownEntities instanceof List) ? state.knownEntities : []
+    List missing = (state.missingEntities instanceof List) ? state.missingEntities : []
+    List keptKnown   = known.findAll { live.contains(it.toString()) }
+    List keptMissing = missing.findAll { live.contains(it.toString()) }
+    if (keptKnown.size() != known.size()) {
+        if (settings?.logEnable) log.debug "${device.displayName}: forgetting ${known.size() - keptKnown.size()} entities Home Assistant no longer has"
+        state.knownEntities = keptKnown
+    }
+    if (keptMissing.size() != missing.size()) state.missingEntities = keptMissing
+    emit("healthStatus", healthOf(keptKnown, keptMissing))
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +735,80 @@ String entityFor(String suffix, String scope = "main") {
  */
 Boolean isHiddenCategory(String category) {
     if (!category) return false
-    return (settings?.exposeDiagnostics != true)
+    // state wins while it is set: applyDiagnosticsSetting() writes it because
+    // a setting changed in this execution is not readable until the next one.
+    def expose = (state.exposeDiagnostics != null) ? state.exposeDiagnostics : settings?.exposeDiagnostics
+    return (expose != true)
+}
+
+/** Note an attribute that came from a diagnostic entity, so hiding can remove it. */
+private void noteDiagnosticAttr(String attr) {
+    if (!attr) return
+    String name = (String) (replicaRule(attr)?.name ?: attr)
+    List l = (state.diagnosticAttrs instanceof List) ? state.diagnosticAttrs : []
+    if (!l.contains(name)) {
+        l << name
+        state.diagnosticAttrs = l
+    }
+}
+
+/**
+ * Show or hide diagnostic entities. Called by the listener when the app's
+ * toggle changes. Hiding deletes the attributes they had already created,
+ * which otherwise sat on the device page with their last values for good.
+ * Showing takes effect on the listener's next seed, which follows at once.
+ */
+void applyDiagnosticsSetting(Boolean expose) {
+    boolean want = (expose == true)
+    device.updateSetting("exposeDiagnostics", [value: want ? "true" : "false", type: "bool"])
+    state.exposeDiagnostics = want
+    if (!want) removeDiagnosticAttrs()
+}
+
+private void removeDiagnosticAttrs() {
+    List l = (state.diagnosticAttrs instanceof List) ? state.diagnosticAttrs : []
+    if (!l) return
+    l.each { a ->
+        dropPending(a.toString())
+        try { device.deleteCurrentState(a.toString()) } catch (ignored) { }
+    }
+    state.remove("diagnosticAttrs")
+    log.info "${device.displayName}: removed ${l.size()} diagnostic attribute(s)"
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle and logging, shared by every child driver
+// ---------------------------------------------------------------------------
+
+/** Turn debug logging off. Scheduled by scheduleLogsOff(); called by name. */
+void logsOff() {
+    log.warn "${device.displayName}: debug logging disabled"
+    device.updateSetting("logEnable", [value: "false", type: "bool"])
+}
+
+/** Debug logging switches itself off after 30 minutes. */
+void scheduleLogsOff() {
+    if (settings?.logEnable) runIn(1800, "logsOff")
+}
+
+/** Call from the driver's installed(). */
+void commonInstalled() {
+    scheduleLogsOff()
+}
+
+/** Call from the driver's updated(), i.e. when the user saves Preferences. */
+void commonUpdated() {
+    scheduleLogsOff()
+    // A preference saved by hand wins over the app's last push.
+    state.remove("exposeDiagnostics")
+    if (settings?.exposeDiagnostics != true) removeDiagnosticAttrs()
+    if (state.lastSentAt != null) state.remove("lastSentAt")   // pre-0.7.0 bookkeeping
+    RENAMES_CACHE = null
+}
+
+/** Call from the driver's uninstalled(): drop this device's in-memory bookkeeping. */
+void commonUninstalled() {
+    LAST_SENT.remove(device.id.toString())
 }
 
 // ---------------------------------------------------------------------------
@@ -475,17 +838,6 @@ void haSetNumber(String suffix, def value, String scope = "main") {
 }
 
 /**
- * Set a select entity by suffix, validated against what Home Assistant reports.
- *
- * Drivers expose typed commands (setCycle, setSpinSpeed, ...) whose dropdowns
- * are ENUM constraints, and Hubitat can only build those from a STATIC list in
- * the code -- "preferences can be dynamic, but not commands". A different
- * appliance model may therefore offer options this driver was not written
- * against, because LocalThings reads every writable select's options from the
- * device itself rather than hardcoding them. This is the escape hatch for
- * those; the live list is in state.options_<scope>.
- */
-/**
  * Emit a select entity under the name Home Assistant would show for it.
  *
  * The name is resolved by the LISTENER, which holds the translation table and
@@ -500,14 +852,30 @@ void emitSelect(Map e, String prefix = "") {
     if (isHiddenCategory(e.entityCategory as String)) return
     String camel = snakeToCamel((String) e.suffix)
     String attr = prefix ? (prefix + camel.capitalize()) : camel
+    if (e.entityCategory) noteDiagnosticAttr(attr)
     emit(attr, (e.label ?: e.state)?.toString())
 }
 
-void setSelectOption(String suffix, String option, String scope = "main") {
+/**
+ * Set a select entity by suffix, validated against what Home Assistant reports.
+ *
+ * Drivers expose typed commands (setCycle, setSpinSpeed, ...) whose dropdowns
+ * are ENUM constraints, and Hubitat can only build those from a STATIC list in
+ * the code -- "preferences can be dynamic, but not commands". A different
+ * appliance model may therefore offer options this driver was not written
+ * against, because LocalThings reads every writable select's options from the
+ * device itself rather than hardcoding them. This is the escape hatch for
+ * those; the live list is in state.options_<scope>.
+ *
+ * Returns true when the request was sent, false when it was refused (no such
+ * entity, or an option the appliance does not offer), so a caller such as
+ * startCook can stop rather than start the appliance on the wrong setting.
+ */
+boolean setSelectOption(String suffix, String option, String scope = "main") {
     String entityId = entityFor(suffix, scope)
     if (!entityId) {
         log.warn "${device.displayName}: no '${suffix}' entity known (scope=${scope})"
-        return
+        return false
     }
     // Accepts either the friendly name or the raw code; the listener owns the
     // mapping because it is the thing that knows which name table applies.
@@ -521,9 +889,10 @@ void setSelectOption(String suffix, String option, String scope = "main") {
         log.warn "${device.displayName}: '${option}' is not offered for ${suffix}. " +
                  "Available: ${(optionLabelsFor(suffix, scope) ?: opts).join(', ')} " +
                  "(also listed as '${optionVarName(scope, suffix)}' in State Variables)"
-        return
+        return false
     }
     haSelect(suffix, code, scope)
+    return true
 }
 
 /** "5B", "5b" and "5 B" are the same select code. */
@@ -613,6 +982,7 @@ String emitGeneric(Map e, String prefix = "") {
 
     String attr = prefix ? (prefix + snakeToCamel(suffix).capitalize()) : snakeToCamel(suffix)
     if (!attr) attr = prefix ?: domain
+    if (e.entityCategory) noteDiagnosticAttr(attr)
 
     switch (domain) {
         case "binary_sensor":
@@ -630,9 +1000,17 @@ String emitGeneric(Map e, String prefix = "") {
             // attribute absent (or at its last real reading) is the lesser
             // evil -- the range setpoint sits at "unknown" whenever the oven
             // is off.
+            // A temperature entity's unit is remembered even with no reading,
+            // so a setpoint command can convert before the first one arrives.
+            if (tempScaleOf(e.unit)) rememberUnit((String) (e.scope ?: "main"), (String) suffix, e.unit)
             if (isNullState(raw)) {
                 if (settings?.logEnable) log.debug "${attr}: no reading (${raw}) -- not emitting"
                 return null
+            }
+            // A temperature in the entity's unit becomes one in the hub's.
+            if (tempScaleOf(e.unit)) {
+                emitTemperature(attr, e)
+                return attr
             }
             emit(attr, coerce(raw), e.unit ? [unit: e.unit] : [:])
             return attr
@@ -664,13 +1042,18 @@ void rememberOptions(String scope, String suffix, def options, def labels = null
     if (!(options instanceof List)) return
     String key = "options_${scope}"
     Map m = (state[key] instanceof Map) ? state[key] : [:]
-    m[suffix] = options
-    state[key] = m
+    // Every select event carries its options; write state only when they change.
+    if (m[suffix] != options) {
+        m[suffix] = options
+        state[key] = m
+    }
 
     List names = (labels instanceof List && ((List) labels).size() == ((List) options).size())
                      ? (List) labels : (List) options
-    state[optionVarName(scope, suffix)] = names.join(", ")
-    state.remove("optionLabels_${scope}")       // superseded by the per-select vars
+    String varName = optionVarName(scope, suffix)
+    String joined = names.join(", ")
+    if (state[varName] != joined) state[varName] = joined
+    if (state["optionLabels_${scope}"] != null) state.remove("optionLabels_${scope}")   // superseded by the per-select vars
 }
 
 /** "spin_speed" -> "Spin Speed"; a subdevice gets its scope in brackets. */
@@ -687,4 +1070,171 @@ List optionLabelsFor(String suffix, String scope = "main") {
 List optionsFor(String suffix, String scope = "main") {
     Map m = (state["options_${scope}"] instanceof Map) ? state["options_${scope}"] : [:]
     return (m[suffix] instanceof List) ? (List) m[suffix] : []
+}
+
+// ---------------------------------------------------------------------------
+// Driver helpers: scope prefix, energy, battery, CO2, domain lookup
+// ---------------------------------------------------------------------------
+
+/**
+ * The attribute prefix for an entity's scope: "" on the main device, else the
+ * scope itself ("subdevice1"), so a subdevice reading never overwrites the
+ * main attribute of the same name. Both emitGeneric and emitSelect take it.
+ */
+String scopePrefix(Map e) {
+    String s = e?.scope as String
+    return (!s || s == "main") ? "" : s
+}
+
+/**
+ * An energy reading in kWh, the unit Hubitat's EnergyMeter uses. Home
+ * Assistant's Wh or MWh is converted; a reading with no unit is taken as Wh,
+ * which is what LocalThings reports. Any other unit passes through as given.
+ */
+void emitEnergy(String attr, Map e) {
+    if (attr == null || e == null || isNullState(e.state)) return
+    def n = coerce(e.state)
+    if (!(n instanceof Number)) return
+    String u = (e.unit ?: "Wh").toString().trim()
+    double v = ((Number) n).doubleValue()
+    if (u.equalsIgnoreCase("Wh"))       v = v / 1000.0d
+    else if (u.equalsIgnoreCase("MWh")) v = v * 1000.0d
+    else if (!u.equalsIgnoreCase("kWh")) { emit(attr, n, [unit: u]); return }
+    emit(attr, BigDecimal.valueOf(v).setScale(3, BigDecimal.ROUND_HALF_UP), [unit: "kWh"])
+}
+
+/**
+ * A battery percentage for capability Battery. Sent whatever the entity's
+ * category: upstream tags some batteries diagnostic, but a capability
+ * attribute that stays empty is no use to a rule. A non-numeric state is
+ * not sent, since battery is a number.
+ */
+void emitBattery(Map e, String attr = "battery") {
+    if (e == null || isNullState(e.state)) return
+    def n = coerce(e.state)
+    if (n instanceof Number) emit(attr, n, [unit: "%"])
+}
+
+/**
+ * A CO2 entity: the existing co2 attribute as before, plus carbonDioxide for
+ * capability CarbonDioxideMeasurement, which is sent whatever the category
+ * for the same reason as the battery.
+ */
+void emitCarbonDioxide(Map e, String prefix = "") {
+    emitGeneric(e, prefix)
+    if (prefix || isNullState(e?.state)) return
+    def n = coerce(e.state)
+    if (n instanceof Number) emit("carbonDioxide", n, [unit: e.unit ?: "ppm"])
+}
+
+/**
+ * The suffix to command for an entity of `domain` ("fan", "climate"):
+ * `preferred` when that entity is in the domain, else the entity named for the
+ * device itself (suffix ""), else the first known entity in the domain, else
+ * null. A fan or climate entity named exactly for its device has an empty
+ * suffix, which a hardcoded suffix would miss.
+ */
+String suffixInDomain(String domain, String preferred = null, String scope = "main") {
+    String prefix = domain + "."
+    if (preferred != null && entityFor(preferred, scope)?.startsWith(prefix)) return preferred
+    if (entityFor("", scope)?.startsWith(prefix)) return ""
+    Map m = (state["entityMap_${scope}"] instanceof Map) ? (Map) state["entityMap_${scope}"] : [:]
+    def hit = m.find { k, v -> v?.toString()?.startsWith(prefix) }
+    return hit ? hit.key as String : null
+}
+
+/**
+ * The fan a setFan command should drive: the one named for the device
+ * (suffix "") first, since that is the appliance's main fan, then `preferred`,
+ * then any fan entity. Says once, at info, which one it picked.
+ */
+String fanTarget(String preferred = "fan") {
+    String s = entityFor("")?.startsWith("fan.") ? "" : suffixInDomain("fan", preferred)
+    if (s != null && state.fanTargetLogged != s) {
+        log.info "${device.displayName}: setFan drives ${entityFor(s)}"
+        state.fanTargetLogged = s
+    }
+    return s
+}
+
+/**
+ * The first three lines of every driver's parseEntity: remember the entity,
+ * note its health, and log it.
+ */
+void beginEntity(Map e) {
+    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
+    noteEntityHealth(e)
+    if (settings?.logEnable) log.debug "entity ${e.entityId} (${e.suffix}, scope=${e.scope}) = ${e.state}"
+}
+
+// ---------------------------------------------------------------------------
+// Oven and Range: cooking helpers shared by the two drivers
+// ---------------------------------------------------------------------------
+//
+// Both drivers fold a second oven cavity into one device. The listener names
+// its scope after the subdevice ("subdevice1"); it is remembered as it is seen
+// rather than assumed, so commands reach whatever this oven calls it.
+
+/** Remember the scope a second-cavity entity arrived under. */
+void ovenNoteCavity(String scope) {
+    if (scope && scope != "main" && state.cavityScope != scope) state.cavityScope = scope
+}
+
+/** The second cavity's scope; "subdevice1" until one has been seen. */
+String ovenCavityScope() { return (state.cavityScope ?: "subdevice1") as String }
+
+/** Replica refused cavity commands unless ovenCavityStatus was "on". An unknown status is let through. */
+boolean ovenCavityReady(String what) {
+    if (device.currentValue("ovenCavityStatus") == "off") {
+        log.warn "${device.displayName}: ${what} ignored -- the divider is out " +
+                 "(ovenCavityStatus: off), so there is no lower oven"
+        return false
+    }
+    return true
+}
+
+/** Set cook_time from a Replica-style time. Returns false, sending nothing, when the time can't be read. */
+boolean ovenSetCookMinutes(String scope, String time) {
+    Integer mins = replicaTimeToMinutes(time)
+    if (mins == null) return false
+    haSetNumber("cook_time", mins, scope)
+    return true
+}
+
+/**
+ * Replica's start(mode, time, setpoint); every argument is optional. A mode
+ * the oven does not offer, or a time that can't be read, stops here rather
+ * than pressing Start on whatever mode and time the oven last held. The
+ * setpoint is converted from the hub's scale to the oven's.
+ */
+void ovenStartCook(String scope, String mode, String time, def setpoint) {
+    // Check everything that can be checked before sending anything, so a
+    // refused argument never leaves the oven half set up.
+    Integer mins = null
+    if (time) {
+        mins = replicaTimeToMinutes(time)
+        if (mins == null) {
+            log.warn "${device.displayName}: not started -- can't read cook time '${time}'"
+            return
+        }
+    }
+    if (setpoint != null && !entityFor("setpoint", scope)) {
+        log.warn "${device.displayName}: not started -- no setpoint entity is known for this oven"
+        return
+    }
+    if (setpoint != null && !tempScaleOf(unitFor("setpoint", scope))) {
+        log.warn "${device.displayName}: not started -- the oven has not reported its " +
+                 "setpoint unit yet, so ${setpoint} can't be converted safely"
+        return
+    }
+    if (mode && !setSelectOption("cooking_mode", mode, scope)) {
+        log.warn "${device.displayName}: not started -- cooking mode '${mode}' was not accepted"
+        return
+    }
+    if (mins != null) haSetNumber("cook_time", mins, scope)
+    if (setpoint != null && !haSetTemperature("setpoint", setpoint, scope)) {
+        log.warn "${device.displayName}: not started -- setpoint ${setpoint} was not sent"
+        return
+    }
+    haPress("start_cooking", scope)
 }

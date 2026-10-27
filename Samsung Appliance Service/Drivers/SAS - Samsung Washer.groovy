@@ -11,8 +11,15 @@
  *  Attribute names follow the HubiThings Replica Samsung Washer driver so
  *  Rule Machine rules carry over; see attrRenames().
  *
- *  Version: 0.6.1
+ *  Version: 0.7.0
  *  Author:  Albert Mulder (almulder)
+ *
+ *  0.7.0 - needs SAS-Samsung-Appliance-Common 0.7.0
+ *    - Debug logging defaults off and turns itself off after 30 minutes.
+ *    - setCycle, setWashTemperature, setSpinSpeed and setSelectOption, for any other select.
+ *    - energy is in kWh, Hubitat's EnergyMeter unit; LocalThings' Wh is converted. energySaved too.
+ *    - A subdevice entity lands on its own subdevice1-prefixed attribute instead of overwriting the main one.
+ *    - setDelayStart, as on the dishwasher.
  */
 
 metadata {
@@ -55,12 +62,19 @@ metadata {
         command "start"
         command "stop"
         command "pause"
+        command "setCycle", [[name: "Cycle*", type: "STRING", description: "See the 'Cycle' state variable for this appliance's options"]]
+        command "setWashTemperature", [[name: "Wash temperature*", type: "STRING", description: "See the 'Wash Temperature' state variable for this appliance's options"]]
+        command "setSpinSpeed", [[name: "Spin speed*", type: "STRING", description: "See the 'Spin Speed' state variable for this appliance's options"]]
+        command "setDelayStart", [[name: "Hours*", type: "NUMBER"]]
+        command "setSelectOption", [[name: "Entity suffix*", type: "STRING"],
+                                    [name: "Option*", type: "STRING"]]
     }
 
     preferences {
         input name: "exposeDiagnostics", type: "bool", defaultValue: false,
               title: "Expose diagnostic entities"
-        input name: "logEnable", type: "bool", defaultValue: true, title: "Debug logging"
+        input name: "logEnable", type: "bool", defaultValue: false, title: "Debug logging",
+              description: "Turns itself off after 30 minutes"
         input name: "txtEnable", type: "bool", defaultValue: true, title: "Description text logging"
     }
 }
@@ -82,13 +96,26 @@ Map attrRenames() {
     ]
 }
 
-void installed() { log.info "${device.displayName} installed" }
-void updated() { log.info "${device.displayName} updated" }
+void installed() { log.info "${device.displayName} installed"; commonInstalled() }
+void updated() { log.info "${device.displayName} updated"; commonUpdated() }
+
+void uninstalled() { commonUninstalled() }
 
 void parseEntity(Map e) {
-    rememberEntity((String) e.scope, (String) e.suffix, (String) e.entityId)
-    noteEntityHealth(e)
-    if (logEnable) log.debug "entity ${e.entityId} (${e.suffix}) = ${e.state}"
+    beginEntity(e)
+
+    // A subdevice reading gets its scope as a prefix, so it can never
+    // overwrite the main attribute of the same name.
+    String scope = scopePrefix(e)
+    if (scope) {
+        if (e.domain == "select") {
+            rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
+            emitSelect(e, scope)
+        } else {
+            emitGeneric(e, scope)
+        }
+        return
+    }
     if (e.domain == "select") {
         rememberOptions((String) e.scope, (String) e.suffix, e.options, e.optionLabels)
         emitSelect(e, "")
@@ -98,9 +125,7 @@ void parseEntity(Map e) {
     switch (e.suffix) {
         case "energy":
         case "energy_saved":
-            if (!isNullState(e.state)) {
-                emit(snakeToCamel((String) e.suffix), coerce(e.state), [unit: e.unit ?: "Wh"])
-            }
+            emitEnergy(snakeToCamel((String) e.suffix), e)
             return
         case "water_consumption":
             if (!isNullState(e.state)) emit("waterConsumption", coerce(e.state), [unit: e.unit ?: "L"])
@@ -113,6 +138,12 @@ void parseEntity(Map e) {
 void start() { haPress("start") }
 void stop()  { haPress("stop") }
 void pause() { haPress("pause") }
+
+void setDelayStart(BigDecimal hours) { haSetNumber("delay_start", hours) }
+
+void setCycle(String v)           { setSelectOption("cycle", v) }
+void setWashTemperature(String v) { setSelectOption("wash_temperature", v) }
+void setSpinSpeed(String v)       { setSelectOption("spin_speed", v) }
 
 // --- settings -----------------------------------------------------------
 

@@ -3,6 +3,12 @@
  *  © 2025 Albert Mulder
  *
  *  
+ *  1.2.0 - Audit fixes: battery/temperature-only reports no longer force motion inactive; F-136 temperature
+ *          correction limited to readings below -40 so real cold readings are kept; battery 0 now reports 0%
+ *          and a message without a battery reading leaves battery unchanged; no forced isStateChange events;
+ *          new device token accepted from the app (setDeviceToken); broker credentials no longer stored; no
+ *          extra poll on app save; debug logging turns itself off after 30 minutes. Corrected °C value is
+ *          rounded to 0.1.
  *  1.1.2 - Updated for HPM
  *  1.1.1 - Harden the beginning of processStateData(String payload) to coerce/guard data and loraInfo before dereferencing.
  *  1.1.0 - Initial working driver
@@ -10,7 +16,7 @@
 
 import groovy.json.JsonSlurper
 
-def clientVersion() { return "1.1.2" }
+def clientVersion() { return "1.2.0"}
 def copyright()     { return "© 2025 Albert Mulder" }
 def driverName()    { return "YoLink™ MotionSensor (Local API Edition)" }
 
@@ -24,7 +30,7 @@ preferences {
                           <b>Temperature Scale:</b> ${activeScale()}<br>
                           <b>Date/Time Format:</b> ${activeFmt()}<br>
                           <br>${copyright()}"""
-    input name: "debug", type: "bool", title: "Enable debug logging", defaultValue: false
+    input name: "debug", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
 }
 
 /* ============================== Metadata ============================= */
@@ -68,15 +74,30 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, loca
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP
-    state.clientId     = clientId
-    state.clientSecret = clientSecret
+    state.remove("clientId")       // broker credentials are only needed by the MQTT Listener
+    state.remove("clientSecret")
     rememberState("devId", devId)
 
     logDebug "ServiceSetup: DNI=${state.my_dni}, Device Id=${state.devId}, HubIP=${state.localHubIP}, TokenSet=${!!state.token}"
-    reset()
+    state.driverVersion = clientVersion()  // keep local only
+    // No poll here: the app runs a reconcile right after setup, which polls every device once
 }
 
 boolean isSetup() { (state.devId && state.token) }
+
+// Called by the app when the Local Hub issues a new device token
+void setDeviceToken(token) {
+    if (token && state.token != token) {
+        state.token = token
+        logDebug("Device token updated")
+    }
+}
+
+void logsOff() {
+    log.warn "${device.displayName}: debug logging disabled"
+    device.updateSetting("debug", [value: "false", type: "bool"])
+    state.debug = false
+}
 
 def installed() {
     state.driverVersion = clientVersion() // keep in state only; do NOT sendEvent
@@ -86,6 +107,7 @@ def installed() {
 def updated() {
     state.debug = (settings?.debug == true)
     state.driverVersion = clientVersion() // keep in state only; do NOT sendEvent
+    if (state.debug) runIn(1800, "logsOff")
 }
 
 def uninstalled() {
@@ -107,8 +129,9 @@ def poll(force = null) {
 def refresh() { poll(true) }
 
 def pollDevice(delay=1) {
+    state.lastPollMs = now()
     runIn((delay ?: 1) as int, "getDevicestate")
-    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone), isStateChange: true)
+    sendEvent(name: "lastPoll", value: new Date().format(activeFmt(), location?.timeZone))
 }
 
 /* ========================= Local API Interaction ===================== */
@@ -121,6 +144,8 @@ def getDevicestate() {
             token       : state.token
         ]
         def object = parent.pollAPI(request, state.name ?: "MotionSensor", state.type ?: "MotionSensor")
+        String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
+        if (latestToken && latestToken != state.token) state.token = latestToken
         if (object) {
             if (successful(object)) {
                 parseDevice(object)
@@ -165,19 +190,19 @@ private void parseDevice(object) {
     def changedAt = data?.stateChangedAt
 
     // Emit readings
-    if (temp != null) sendEvent(name: "temperature", value: temp, unit: activeScale(), isStateChange: true)
+    if (temp != null) sendEvent(name: "temperature", value: temp, unit: activeScale())
     if (batteryPct != null) rememberBatteryState(batteryPct as int, true)
 
-    if (motionStr) sendEvent(name: "motion", value: motionStr, isStateChange: true)
+    if (motionStr) sendEvent(name: "motion", value: motionStr)
 
-    rememberState("state", stateStr)
+    if (stateStr) rememberState("state", stateStr)
     if (firmware) rememberState("firmware", firmware)
     if (reportAt) rememberState("reportAt", fmtTs(reportAt))
     if (changedAt) rememberState("stateChangedAt", fmtTs(changedAt))
 
     // LoRa details
     if (lora?.devNetType) rememberState("loraDevNetType", lora.devNetType)
-    if (lora?.signal != null) sendEvent(name: "signal", value: "${lora.signal} dBm", isStateChange: true)
+    if (lora?.signal != null) sendEvent(name: "signal", value: "${lora.signal} dBm")
     if (lora?.gateways != null) rememberState("gateways", lora.gateways as int)
     if (lora?.gatewayId != null) rememberState("gatewayId", lora.gatewayId)
 
@@ -222,15 +247,15 @@ def processStateData(String payload) {
         def reportAt  = data?.reportAt
         def changedAt = data?.stateChangedAt
 
-        if (temp != null) sendEvent(name: "temperature", value: temp, unit: activeScale(), isStateChange: true)
+        if (temp != null) sendEvent(name: "temperature", value: temp, unit: activeScale())
         if (batteryPct != null) rememberBatteryState(batteryPct as int, false)
         if (fw) rememberState("firmware", fw)
         if (stateStr) rememberState("state", stateStr)
-        if (motionStr) sendEvent(name: "motion", value: motionStr, isStateChange: true)
+        if (motionStr) sendEvent(name: "motion", value: motionStr)
 
         // LoRa
         if (lora?.devNetType) rememberState("loraDevNetType", lora.devNetType)
-        if (lora?.signal != null) sendEvent(name: "signal", value: "${lora.signal} dBm", isStateChange: true)
+        if (lora?.signal != null) sendEvent(name: "signal", value: "${lora.signal} dBm")
         if (lora?.gateways != null) rememberState("gateways", lora.gateways as int)
         if (lora?.gatewayId != null) rememberState("gatewayId", lora.gatewayId)
 
@@ -252,30 +277,31 @@ def reset() {
     poll(true)
 }
 
-def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value", isStateChange: true) }
+def lastResponse(value) { sendEvent(name: "lastResponse", value: "$value") }
 
 def rememberState(name, value, unit=null) {
     if (state."$name" != value) {
         state."$name" = value
         if (unit) {
-            sendEvent(name: "$name", value: "$value", unit: "$unit", isStateChange: true)
+            sendEvent(name: "$name", value: "$value", unit: "$unit")
         } else {
-            sendEvent(name: "$name", value: "$value", isStateChange: true)
+            sendEvent(name: "$name", value: "$value")
         }
     }
 }
 
 def rememberBatteryState(def value, boolean forceSend = false) {
+    if (value == null) return            // no reading in this message: leave battery as is
     if (state.battery != value || forceSend) {
         state.battery = value
-        sendEvent(name: "battery", value: value?.toString(), unit: "%", isStateChange: true)
+        sendEvent(name: "battery", value: value?.toString(), unit: "%")
         logDebug("rememberBatteryState: battery => ${value}% (forceSend=${forceSend})")
     }
 }
 
 /* === Formatting helpers (format comes from parent app) === */
 private String activeFmt() { parent?.getDateTimeFormat() ?: "MM/dd/yyyy hh:mm:ss a" }
-private String activeScale() { parent?.temperatureScale() ?: "C" }
+private String activeScale() { parent?.temperatureScale() ?: "F" }
 
 private String fmtTs(def ts) {
     String f = activeFmt()
@@ -318,15 +344,19 @@ private def normalizeAndConvertTemperature(def tempRaw) {
 
     // 2) Preferred behavior: Local API reports temperature in °C, so we convert like THSensor
     // BUT: Some MotionSensor payloads appear to report Fahrenheit as (F - 136).
-    // If we see a strongly negative value that would become a plausible Fahrenheit temp by adding 136,
-    // normalize to °C first so parent.convertTemperature behaves correctly for either parent scale.
+    // If we see a value below -40 (colder than any YoLink sensor is rated to operate, so it cannot be a
+    // genuine °C reading) that becomes a plausible indoor Fahrenheit temp by adding 136, normalize to °C
+    // first so parent.convertTemperature behaves correctly for either parent scale.
+    // (The old -20 threshold misread real cold outdoor readings, e.g. -30°C became 106°F.)
     //
+    // Gate: raw values below -40 and down to -104 (i.e. 32..95°F after +136) are treated as encoded °F;
+    // -40 and warmer is a genuine °C reading. Encoded readings above 95°F are not corrected.
     // Example: raw -57 => 79°F (because -57 + 136 = 79°F) => 26.1°C
-    if (v < -20) {
+    if (v < -40) {
         def fCandidate = v + 136.0
-        if (fCandidate >= 32 && fCandidate <= 122) {
+        if (fCandidate >= 32 && fCandidate <= 95) {
             // Convert that Fahrenheit candidate to °C, then proceed with THSensor conversion path.
-            v = (fCandidate - 32.0) * (5.0/9.0)
+            v = (((fCandidate - 32.0) * (5.0/9.0)) as BigDecimal).setScale(1, BigDecimal.ROUND_HALF_UP).doubleValue()   // so C mode shows 26.1, not 26.111...
             logDebug("Temp normalized (F-136): raw=${tempRaw} => f=${fCandidate} => c=${v}")
         }
     }
@@ -355,14 +385,15 @@ private String deriveMotion(def motionVal, String stateStr, def st) {
 
     // Some devices signal via "state" or "alarm"
     if (stateStr?.toLowerCase() == "alert") return "active"
+    if (stateStr?.toLowerCase() == "normal") return "inactive"
 
     def alarm = (st instanceof Map) ? st?.alarm : null
     if (alarm instanceof Map) {
         if (alarm?.motion == true) return "active"
     }
 
-    // Default to inactive if we can't infer
-    return "inactive"
+    // Can't infer (e.g. a battery/temperature-only report): leave motion unchanged
+    return null
 }
 
 /* === Logging & helpers === */

@@ -212,11 +212,42 @@
  *          tested, found broken, and fully replaced by later entries - none of that code
  *          exists anymore, so keeping their changelog text around would only mislead
  *          anyone reading this history looking for how the current code actually works.
+ *  2.1.0 - Code-audit fixes (requires Listener 2.1.0+ and Pro/Aura 2.1.0+):
+ *          - The app now appears under Integrations in the Hubitat sidebar instead of
+ *            Apps (menu: "Integrations", platform 2.5.0+; older firmware keeps it under Apps).
+ *          - The update queue now lives in memory (a ConcurrentHashMap keyed by
+ *            dni+attribute) instead of state. Reading and rewriting the whole queue map
+ *            from two threads at once (the Listener's parse thread and the pump) could
+ *            lose or re-send updates. The pump is only scheduled when one isn't already
+ *            pending, so a steady stream of updates can no longer keep pushing it back
+ *            (runInMillis replaces the pending job, which used to starve the drain), and
+ *            each tick drains up to QUEUE_BATCH_SIZE items instead of one.
+ *          - "pending" placeholders are only stamped on devices that were just CREATED,
+ *            never on existing ones when the wizard is re-run, and only on the outlet/
+ *            nightlight attributes - not on level, numeric sensors, motion/presence or
+ *            buttons. The Listener now replays every known value right after setup, so
+ *            the placeholders are replaced within a couple of seconds.
+ *          - A device you already have that doesn't answer its probe (e.g. unplugged right
+ *            now) is no longer hidden from the picker - it's listed as "NO RESPONSE" and
+ *            stays selected. Finish only removes devices that were offered on the picker
+ *            and deselected, so an existing device is never deleted just because it was
+ *            missing from this scan.
+ *          - The Listener-creation error page tells a missing Listener driver apart from
+ *            an orphaned Listener device.
+ *          - Unit fallbacks match what the Settings page shows (F and in).
+ *          - Device removal is wrapped in try/catch so one failure doesn't abort the page,
+ *            and a model change that would need a different driver is logged.
+ *          - Added getMqttPassword() so the Listener doesn't keep the broker password in
+ *            its device state.
+ *          - Re-review follow-up: the queue drains in arrival order (FIFO), so a busy
+ *            device can't keep another device's update waiting behind it.
  */
 import groovy.transform.Field
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 def appName() { "InvisOutlet Device Service" }
-def appVersion() { "2.0.0" }
+def appVersion() { "2.1.0" }
 private def copyright() { return "<br>© 2026-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved." }
 private def getImagePath() { return "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/refs/heads/main/Intecular/Pics/" }
 
@@ -227,18 +258,31 @@ private def getImagePath() { return "https://raw.githubusercontent.com/almulder/
 @Field static final String DEVICE_FILTER = "invis"
 @Field static final Integer BUILT_IN_BROKER_PORT = 1883
 
-// How often the update queue drains, in milliseconds - one forwardUpdateEntity() call
-// into a child device's updateEntity() happens per tick, no matter how many are queued.
-// This is the actual ceiling on hub load from this integration; lower = more responsive
-// devices but less headroom, higher = more headroom but slower to reflect new readings.
+// How often the update queue drains, in milliseconds, and how many queued updates are
+// delivered per tick - together the ceiling on how fast this integration calls into
+// device drivers (QUEUE_BATCH_SIZE per QUEUE_DRAIN_INTERVAL_MS). Lower interval / bigger
+// batch = more responsive devices but less headroom.
 @Field static final Integer QUEUE_DRAIN_INTERVAL_MS = 200
+@Field static final Integer QUEUE_BATCH_SIZE = 4
+
+// 2.1.0: pending device updates, keyed by app id, then by "dni|attrName" (latest value
+// wins). In memory rather than state: concurrent read-modify-write of a state map from
+// the Listener's thread and the pump's thread was losing updates. Lost on a hub reboot
+// or code save, which only drops values that are seconds old anyway.
+@Field static final ConcurrentHashMap<String, ConcurrentHashMap> UPDATE_QUEUES = new ConcurrentHashMap()
+// Arrival order of the keys in UPDATE_QUEUES (each key appears once while queued), so the
+// pump drains oldest-first.
+@Field static final ConcurrentHashMap<String, ConcurrentLinkedQueue> UPDATE_ORDER = new ConcurrentHashMap()
+// When the next pump run is due, per app id - absent when none is pending.
+@Field static final ConcurrentHashMap<String, Long> PUMP_DUE = new ConcurrentHashMap()
 
 definition(
     name: "InvisOutlet Device Service",
     namespace: "almulder",
     author: "Albert Mulder",
     description: "Connects your InvisOutlet Aura/Pro devices to Hubitat via MQTT.",
-    category: "InvisOutlet",
+    category: "Integrations",
+    menu: "Integrations",    // places the app under the sidebar's Integrations section (platform 2.5.0+; older hubs keep it under Apps)
     iconUrl: "",
     iconX2Url: "",
     singleInstance: true,
@@ -439,6 +483,7 @@ def credentials() {
     // regardless of connection state, for when the user wants to force it anyway.
     def existingListener = getListenerDevice()
     String listenerError = null
+    boolean listenerErrorIsMissingDriver = false
     boolean listenerConnected = existingListener?.currentValue("connectionStatus") == "connected"
 
     boolean forceRetest = settings.retestBroker == true
@@ -453,11 +498,13 @@ def credentials() {
         try {
             state.brokerDetected = runBrokerDetection()
         } catch (e) {
-            // A device with this DNI exists on the hub but isn't a child of this app
-            // instance - most likely an orphan left over from an earlier install/
+            // Usually a device with this DNI exists on the hub but isn't a child of this
+            // app instance - most likely an orphan left over from an earlier install/
             // reinstall. There's no way for the app to adopt someone else's device by
-            // DNI, so this needs a manual cleanup step rather than a silent retry.
-            listenerError = e.message
+            // DNI, so this needs a manual cleanup step rather than a silent retry. The
+            // other common cause is the Listener driver simply not being installed.
+            listenerError = e.message ?: e.toString()
+            listenerErrorIsMissingDriver = isMissingDriverError(e)
         }
     } else if (state.brokerDetected == null) {
         // Listener is connected but we've never recorded a detection result (shouldn't
@@ -469,8 +516,13 @@ def credentials() {
         return dynamicPage(name: "credentials", title: pageTitle("MQTT Broker Settings"), nextPage: "credentials", uninstall: false) {
             section("") {
                 paragraph boldRedTitle("Could not set up the InvisOutlet MQTT Listener device.")
-                paragraph "A device with the network ID <code>invisoutlet-mqtt-listener</code> already exists on this hub, but isn't linked as a child of this app instance - most likely left over from an earlier install or reinstall."
-                paragraph "Go to <b>Devices</b>, find <b>InvisOutlet MQTT Listener</b>, confirm it's not one you need to keep (check its 'In use by' / parent app), and delete it. Then come back here."
+                if (listenerErrorIsMissingDriver) {
+                    paragraph "The <b>InvisOutlet MQTT Listener</b> driver isn't installed on this hub."
+                    paragraph "Go to <b>Drivers Code</b>, add the <b>InvisOutlet MQTT Listener</b> driver (and the <b>InvisOutlet Pro</b> and <b>InvisOutlet Aura</b> drivers) and save them - or install the package through Hubitat Package Manager. Then come back here."
+                } else {
+                    paragraph "A device with the network ID <code>invisoutlet-mqtt-listener</code> already exists on this hub, but isn't linked as a child of this app instance - most likely left over from an earlier install or reinstall."
+                    paragraph "Go to <b>Devices</b>, find <b>InvisOutlet MQTT Listener</b>, confirm it's not one you need to keep (check its 'In use by' / parent app), and delete it. Then come back here."
+                }
                 paragraph "<i style='font-size:0.85em;'>Error detail: ${listenerError}</i>"
                 input "retryListenerCheck", "bool", title: boldTitle("I've removed it - try again"), defaultValue: false, submitOnChange: true
                 if (settings.retryListenerCheck) {
@@ -609,6 +661,7 @@ def confirmDevices() {
     // results across the repeated submitOnChange re-renders that happen when the user
     // is just clicking checkboxes on that same page.
     state.remove("deviceListCache")
+    state.remove("deviceListOffered")
     dynamicPage(name: "confirmDevices", title: pageTitle("Confirm Devices"), uninstall: false) {
         section("") {
             paragraph "Clicking <b>Next</b> will contact each discovered device to actively confirm it's still real and reachable, one at a time - InvisHome does not appear to clear a device's MQTT listing when it's removed from the phone app, so without this check, removed devices could keep showing up as selectable indefinitely."
@@ -695,15 +748,25 @@ def deviceList() {
                 options[d.dni] = "${d.name} - ${d.model}"
                 break
             default:
-                // Failed to respond to an active probe - hidden entirely rather than
-                // shown with a tag, since InvisHome does not appear to clear a removed
-                // device's retained MQTT listing, and a device that fails to respond
-                // is far more likely to have been removed than to be a real unit that's
-                // simply temporarily unreachable.
-                log.info "Hiding ${d.name} (${d.dni}) from the device list - failed to respond to an active probe"
+                if (getChildDevice(d.dni)) {
+                    // Already a Hubitat device - it may just be unplugged right now.
+                    // Hiding it would drop it from the selection and Finish would then
+                    // delete it (and break every rule using it), so it stays listed.
+                    options[d.dni] = "${d.name} - ${d.model} (NO RESPONSE - existing device)"
+                    log.info "${d.name} (${d.dni}) didn't respond to its probe but is an existing device - keeping it in the list"
+                } else {
+                    // Failed to respond to an active probe - hidden entirely rather than
+                    // shown with a tag, since InvisHome does not appear to clear a removed
+                    // device's retained MQTT listing, and a device that fails to respond
+                    // is far more likely to have been removed than to be a real unit that's
+                    // simply temporarily unreachable.
+                    log.info "Hiding ${d.name} (${d.dni}) from the device list - failed to respond to an active probe"
+                }
         }
     }
     int count = options.size()
+    // Finish only removes devices that were actually offered here and then deselected.
+    state.deviceListOffered = options.keySet().collect { it.toString() }
 
     dynamicPage(name: "deviceList", title: sectionTitle("${count} InvisOutlet device(s) found - select which to add to Hubitat"), uninstall: false) {
         section("") {
@@ -712,9 +775,9 @@ def deviceList() {
             } else if (count == 0) {
                 paragraph boldRedTitle("${devices.size()} device(s) were discovered on the broker, but none responded to an active probe just now, so all were hidden. If you expect a real device here, try again in a moment (it may just be temporarily offline), or check Devices for a stuck InvisOutlet MQTT Listener from an earlier setup attempt.")
             }
-            paragraph "Each discovered device's nightlight was just flashed on/off to actively confirm it's still reachable. Devices that didn't respond have been hidden from the list below - most likely they've been removed from the InvisHome app but their old broker listing hasn't been cleared, though a real device that's simply powered off or offline right now would be hidden the same way."
+            paragraph "Each discovered device's nightlight was just flashed on/off to actively confirm it's still reachable. New devices that didn't respond have been hidden from the list below - most likely they've been removed from the InvisHome app but their old broker listing hasn't been cleared. Devices you've already added are always listed, marked NO RESPONSE if they didn't answer."
             input(name: "exposed", title: "", type: "enum", description: "Click to choose", options: options, multiple: true, submitOnChange: true)
-            paragraph "Note: clicking 'Next' will create the selected devices and remove any previously-created InvisOutlet devices that are no longer selected."
+            paragraph "Note: clicking 'Next' will create the selected devices and remove any previously-created InvisOutlet devices listed here that you've deselected."
         }
         section("") {
             paragraph "<i style='font-size:0.85em;'>Don't see a device you expect? Toggle below to check again - this takes a few seconds.</i>"
@@ -727,23 +790,44 @@ def finish() {
     def listener = ensureListenerDevice()
     def discovered = listener.getDiscoveredDevices() ?: []
     def keepDnis = []
+    def offered = (state.deviceListOffered ?: []) as List
 
     (settings.exposed ?: []).each { dni ->
         def info = discovered.find { it.dni == dni }
         if (!info) {
-            log.warn "No discovery info found for ${dni} - skipping"
+            // Keep an existing device even without fresh discovery info - only
+            // creating a new one needs it.
+            if (getChildDevice(dni)) {
+                keepDnis << dni
+            } else {
+                log.warn "No discovery info found for ${dni} - skipping"
+            }
             return
         }
-        if (createInvisOutletDevice(dni, info)) {
+        def result = createInvisOutletDevice(dni, info)
+        if (result) {
             keepDnis << dni
-            markPendingStates(listener, dni)
+            // Only brand-new devices get placeholders - stamping them over an existing
+            // device's real values made it look broken until the next state change.
+            if (result == "created") markPendingStates(listener, dni)
         }
     }
 
     getChildDevices().each { cd ->
-        if (cd.deviceNetworkId != listenerDni() && !keepDnis.contains(cd.deviceNetworkId)) {
-            log.info "Removing ${cd.displayName} (no longer selected)"
-            deleteChildDevice(cd.deviceNetworkId)
+        def cdDni = cd.deviceNetworkId
+        if (cdDni == listenerDni() || keepDnis.contains(cdDni)) return
+        if (!offered.contains(cdDni)) {
+            // Not on the picker this time at all (not discovered during this scan) -
+            // never delete a device the user didn't get the chance to keep.
+            log.warn "Keeping ${cd.displayName} - it wasn't discovered during this scan, so it couldn't be offered for selection"
+            keepDnis << cdDni
+            return
+        }
+        log.info "Removing ${cd.displayName} (no longer selected)"
+        try {
+            deleteChildDevice(cdDni)
+        } catch (e) {
+            log.error "Could not remove ${cd.displayName}: ${e}"
         }
     }
 
@@ -770,9 +854,8 @@ def installed() {
 def updated() {
     log.info "InvisOutlet Device Service updated"
     state.remove("pumpScheduled") // no longer used - see scheduleQueuePump()
-    // Anything already stuck in the queue from before this fix was deployed can drain
-    // immediately, rather than waiting for the next MQTT-triggered forwardUpdateEntity().
-    if ((state.updateQueue ?: [:]).any { dni, attrs -> attrs }) scheduleQueuePump()
+    state.remove("updateQueue")   // 2.1.0: the queue lives in memory now (UPDATE_QUEUES)
+    if (!updateQueue().isEmpty()) scheduleQueuePump()
     def listener = getListenerDevice()
     if (listener) {
         // Unit preferences may have changed - re-display already-known readings
@@ -784,7 +867,13 @@ def updated() {
 
 def uninstalled() {
     log.warn "Uninstalling InvisOutlet Device Service - removing all devices it created"
-    getChildDevices().each { deleteChildDevice(it.deviceNetworkId) }
+    getChildDevices().each { cd ->
+        try {
+            deleteChildDevice(cd.deviceNetworkId)
+        } catch (e) {
+            log.error "Could not remove ${cd.displayName}: ${e}"
+        }
+    }
 }
 
 // ---------------- MQTT broker detection ----------------
@@ -890,12 +979,24 @@ def removeListenerDevice() {
     def listener = getListenerDevice()
     if (listener) {
         log.info "Removing InvisOutlet MQTT Listener device - no InvisOutlet devices remain"
-        deleteChildDevice(listener.deviceNetworkId)
+        try {
+            deleteChildDevice(listener.deviceNetworkId)
+        } catch (e) {
+            log.error "Could not remove the InvisOutlet MQTT Listener device: ${e}"
+        }
     }
+}
+
+// True when a child-device creation failed because the driver itself isn't installed,
+// rather than because of a DNI collision.
+private boolean isMissingDriverError(e) {
+    def text = "${e?.class?.name} ${e?.message}".toString()
+    return text.contains("UnknownDeviceType") || text.toLowerCase().contains("not found")
 }
 
 // ---------------- InvisOutlet Pro/Aura device creation ----------------
 
+// Returns "created" for a new device, "updated" for an existing one, or null on failure.
 def createInvisOutletDevice(String dni, Map info) {
     def driverType = (info.model == "Aura") ? "InvisOutlet Aura" : "InvisOutlet Pro"
     def cd = getChildDevice(dni)
@@ -905,21 +1006,25 @@ def createInvisOutletDevice(String dni, Map info) {
             log.info "Created ${cd.displayName} using driver '${driverType}'"
         } catch (e) {
             log.error "Failed to create device for ${dni} using driver '${driverType}': ${e}"
-            return false
+            return null
         }
-    } else {
-        cd.setLabel(buildLabel(info))
+        return "created"
     }
-    return true
+    cd.setLabel(buildLabel(info))
+    // An app can't change an existing device's driver, and deleting/recreating it here
+    // would break every rule using it - so just point it out.
+    if (cd.typeName && cd.typeName != driverType) {
+        log.warn "${cd.displayName} uses the '${cd.typeName}' driver but was detected as '${driverType}' - if that's right, change its Type on the device page"
+    }
+    return "updated"
 }
 
 // Asks the Listener exactly which attributes THIS device actually has (Aura vs Pro
-// differ) and stamps each one with a "pending" placeholder immediately, so the driver
-// page shows something meaningful right away instead of staying blank until a real MQTT
-// value arrives. Calls the child device's updateEntity()/updateLevel() DIRECTLY - not
-// through forwardUpdateEntity()/the update queue - since this is a one-time burst of a
-// handful of calls at device-creation, not ongoing telemetry, so there's no rate-limiting
-// concern, and it avoids relying on the still-unresolved queue-drain issue entirely.
+// differ) and lets the driver stamp a "pending" placeholder on the ones where that's
+// valid (the outlet/nightlight on/off attributes), so a brand-new device's page isn't
+// blank. Only called for newly created devices. Calls the driver DIRECTLY rather than
+// through the update queue, since it's a one-time handful of calls. The Listener replays
+// every known value right after setup, which replaces the placeholders.
 def markPendingStates(listener, String dni) {
     def cd = getChildDevice(dni)
     if (!cd) return
@@ -927,8 +1032,6 @@ def markPendingStates(listener, String dni) {
     attrs.each { entry ->
         try {
             cd.markPending(entry.attr, entry.platform, entry.deviceClass)
-            // Lights have both an on/off-style state AND a separate level - mark both.
-            if (entry.platform == "light") cd.updateLevel("pending")
         } catch (e) {
             log.warn "Could not mark '${entry.attr}' pending on ${dni}: ${e}"
         }
@@ -957,64 +1060,80 @@ def buildLabel(Map info) {
 
 // 1.4.0: no longer calls the child device directly. Instead queues the update (keyed by
 // dni+attrName so a burst of repeated readings for the same attribute only ever keeps the
-// LATEST value, never grows unbounded) and makes sure the drain pump is running. This is
-// the fix for "excessive hub load" errors that persisted even with the Listener's own
-// per-attribute throttling in place - the problem was never any single attribute updating
-// too often, it was several different attributes on the same device landing in the same
-// narrow window and stacking up past Hubitat's per-device call-rate governor.
+// LATEST value, never grows unbounded) and makes sure the drain pump is running. This
+// caps the combined rate of calls into device drivers - several different attributes on
+// the same device landing in the same narrow window used to stack up past Hubitat's
+// per-device call-rate governor.
 def forwardUpdateEntity(String dni, String attrName, String platform, deviceClass, value, unit) {
-    if (state.updateQueue == null) state.updateQueue = [:]
-    def queue = state.updateQueue
-    def perDeviceQueue = queue[dni] ?: [:]
-    perDeviceQueue[attrName] = [platform: platform, deviceClass: deviceClass, value: value, unit: unit]
-    queue[dni] = perDeviceQueue
-    // Explicit top-level reassignment - mutating a map nested two+ levels under state
-    // (state.updateQueue[dni][attrName] = ...) is not reliably guaranteed to persist on
-    // Hubitat without writing the top-level key back explicitly. Cheap and safe even if
-    // it turns out not to have been the issue.
-    state.updateQueue = queue
+    String key = "${dni}|${attrName}".toString()
+    def previous = updateQueue().put(key,
+        [dni: dni, attrName: attrName, platform: platform, deviceClass: deviceClass, value: value, unit: unit])
+    // Only a newly queued key joins the line - a newer value for one already waiting just
+    // replaces it in place.
+    if (previous == null) updateOrder().add(key)
     scheduleQueuePump()
 }
 
+private Map updateQueue() {
+    String key = app.id.toString()
+    Map q = UPDATE_QUEUES.get(key)
+    if (q == null) {
+        UPDATE_QUEUES.putIfAbsent(key, new ConcurrentHashMap())
+        q = UPDATE_QUEUES.get(key)
+    }
+    return q
+}
+
+private ConcurrentLinkedQueue updateOrder() {
+    String key = app.id.toString()
+    ConcurrentLinkedQueue q = UPDATE_ORDER.get(key)
+    if (q == null) {
+        UPDATE_ORDER.putIfAbsent(key, new ConcurrentLinkedQueue())
+        q = UPDATE_ORDER.get(key)
+    }
+    return q
+}
+
+// 2.1.0: only schedules a pump if one isn't already pending. runInMillis() REPLACES a
+// pending job for the same handler, so calling it on every update (as 1.6.5 did) kept
+// pushing the drain back - with updates arriving more often than every 200ms, it never
+// ran at all. PUMP_DUE is in memory, so a code save resets it along with the job it
+// tracked (the 1.6.5 deadlock), and a due time more than 2s in the past is treated as a
+// lost job and rescheduled.
 def scheduleQueuePump() {
-    // No pumpScheduled guard here anymore - it could get permanently stuck true if a
-    // scheduled job was ever invalidated (e.g. by an app code save) without
-    // pumpUpdateQueue() getting a chance to run and reset it, since nothing else ever
-    // clears that flag. That's exactly what real logs showed: items queuing forever
-    // with zero drains, ever. runInMillis() already replaces any existing pending job
-    // for the same handler name, so calling it unconditionally here is safe - it just
-    // resets the timer, it does not stack parallel pump runs.
+    String key = app.id.toString()
+    long nowMs = now()
+    Long due = PUMP_DUE.get(key)
+    if (due != null && due > nowMs - 2000) return
+    PUMP_DUE.put(key, nowMs + QUEUE_DRAIN_INTERVAL_MS)
     runInMillis(QUEUE_DRAIN_INTERVAL_MS, "pumpUpdateQueue")
 }
 
-// Pops exactly ONE queued attribute update - across ALL devices, not per-device - and
-// calls updateEntity() for it, then reschedules itself if anything is left. This is what
-// actually guarantees real wall-clock spacing between every single call into any device
-// driver's updateEntity(), regardless of how many distinct attributes/devices are
-// generating updates at once.
+// Delivers up to QUEUE_BATCH_SIZE queued updates - across ALL devices, oldest first -
+// then reschedules itself if anything is left. Each item is removed atomically before
+// it's delivered, so an update that arrives meanwhile for the same attribute is queued
+// again rather than lost.
 def pumpUpdateQueue() {
-    def queue = state.updateQueue ?: [:]
-
-    def dniWithWork = queue.find { dni, attrs -> attrs }
-    if (dniWithWork) {
-        def dni = dniWithWork.key
-        def attrs = dniWithWork.value
-        def attrName = attrs.keySet().iterator().next()
-        def item = attrs.remove(attrName)
-        // Explicit top-level reassignment after the nested removal, for the same reason
-        // as in forwardUpdateEntity() - without this, the removal may not reliably
-        // persist across this scheduled execution, potentially leaving stale/duplicate
-        // work in the queue or masking whether draining is actually progressing.
-        state.updateQueue = queue
-        def target = getChildDevice(dni)
+    PUMP_DUE.remove(app.id.toString())
+    Map queue = updateQueue()
+    ConcurrentLinkedQueue order = updateOrder()
+    int delivered = 0
+    while (delivered < QUEUE_BATCH_SIZE) {
+        String key = order.poll()
+        if (key == null) break
+        def item = queue.remove(key)
+        if (item == null) continue
+        delivered++
         try {
-            target?.updateEntity(attrName, item.platform, item.deviceClass, item.value, item.unit)
+            getChildDevice(item.dni)?.updateEntity(item.attrName, item.platform, item.deviceClass, item.value, item.unit)
         } catch (e) {
-            log.error "Error forwarding '${attrName}' to device ${dni}: ${e}"
+            log.error "Error forwarding '${item.attrName}' to device ${item.dni}: ${e}"
         }
     }
-
-    if (queue.any { dni, attrs -> attrs }) {
+    if (!queue.isEmpty()) {
+        // Self-heal: a key whose order entry was lost (e.g. a race around a code save)
+        // gets back in line rather than sitting in the map forever.
+        if (order.isEmpty()) queue.keySet().each { order.add(it) }
         scheduleQueuePump()
     }
 }
@@ -1055,8 +1174,11 @@ def sendColorTempCommand(childDevice, String attrName, kelvin) {
 
 // ---------------- settings accessors for the Listener ----------------
 
-def getTemperatureScale() { settings.temperatureScale ?: "C" }
-def getDistanceUnit() { settings.distanceUnit ?: "cm" }
+// Fallbacks match the defaults the Settings page shows.
+def getTemperatureScale() { settings.temperatureScale ?: "F" }
+def getDistanceUnit() { settings.distanceUnit ?: "in" }
+// Read by the Listener at connect time, so the password isn't stored in its device state.
+def getMqttPassword() { effectiveMqttPassword() }
 def isDebugEnabled() { settings.debugging == true }
 
 // ---------------- small HTML helpers (page styling) ----------------
