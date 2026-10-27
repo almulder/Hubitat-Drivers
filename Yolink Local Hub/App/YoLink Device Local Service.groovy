@@ -12,6 +12,16 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expressed or implied. 
  * 
+ * 1.3.0 - Audit fixes: device-token refresh now updates the driver (was throwing on sensors) and no longer loops;
+ *         access token refreshed before expiry and on HTTP 401; battery 0 reports 0% (was -1%) and a missing
+ *         battery reading no longer reports 0%; scheduled reconciles no longer skipped by a few ms of drift;
+ *         hub-offline errors handled on the setup pages; unsupported device types reported in diagnostics;
+ *         tokens/Authorization headers no longer logged; client secret no longer copied into app or sensor state;
+ *         token request body URL-encoded; LeakSensor3 uses the LeakSensor driver; no double poll on app save;
+ *         debug logging turns itself off after 30 minutes. Re-review: the current access token is kept until
+ *         a new one arrives, automatic token refreshes are limited to one per minute, and polls are skipped
+ *         when no token is available; Diagnostics changes no devices when the hub's device list could not
+ *         be read. After updating, open the app and click Done.
  * 1.2.0 - Support for Motion Devices
  * 1.1.1 - Moved Repo for better Forking and updated Links
  * 1.1.0 - Initial Working Version
@@ -21,7 +31,7 @@ import groovy.json.JsonOutput
 import java.net.URLEncoder
 import groovy.transform.Field
 
-private def get_APP_VERSION() {return "1.2.0"}
+private def get_APP_VERSION() {return "1.3.0"}
 private def copyright() {return "<br>© 2025-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved."}
 private def get_APP_NAME() {return "YoLink Device Local Service"}
 
@@ -36,7 +46,7 @@ definition(
     singleInstance: true,
     iconUrl: "${getImagePath()}yolink.png",
     iconX2Url: "${getImagePath()}yolink.png",
-	importUrl: "https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/YoLink_Device_Service.groovy"
+	importUrl: "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Yolink%20Local%20Hub/App/YoLink%20Device%20Local%20Service.groovy"
 )
 
 preferences {
@@ -51,6 +61,7 @@ preferences {
 @Field static diagFile = "YoLink_Local_Service_Diagnostics.txt"
 @Field static errFile = "YoLink_Local_Service_Errors.txt"
 @Field static String diagsep = "-----------------------------------------------------------------------------------------------------------------------------------------------"
+@Field static final List SUPPORTED_TYPES = ["DoorSensor", "LeakSensor", "MotionSensor", "PowerFailureAlarm", "THSensor"]
 String diagData
 String errData 
 
@@ -98,32 +109,32 @@ def credentials() {
                 paragraph "<u><b style='font-size: 24px;'>Obtaining Your User Credentials</b></u>"
                 paragraph ""
                 paragraph "<b>◉</b>  Please open your YoLink mobile app, navigate to the <b>YoLink Local Hub (3)</b>. Note: (1) Shows device is online. (2) Shows device is linked to Local Hub."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/devices.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='${getImagePath()}devices.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉</b>  Click on the 3 dots (1) in the top right corner."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='${getImagePath()}hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉  Locate your IP address:</b> (Hard wired preferred), but you can use either one; just be sure you reserve the IP address in your router as this requires a static IP. (Refer to router manual for help with reserving ip address)"
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/details.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='${getImagePath()}details.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉</b>  Go back to the hub page and click on <b>Local Network (2)</b>."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='${getImagePath()}hub.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉  Locate your Net ID (1)</b>"
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/local_network.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='${getImagePath()}local_network.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
                 paragraph "<b>◉  Client ID & Client Secret:</b> Go to the Integrations tab and locate the Client ID and Client Secret."
-                paragraph "<img src='https://raw.githubusercontent.com/almulder/Yolink-Local-Hub/main/Pics/local_api.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
+                paragraph "<img src='${getImagePath()}local_api.png' alt='YoLink devices' style='max-width: 50%; height: auto; border: 2px solid gray; box-shadow: 4px 4px 6px rgba(0,0,0,0.5);'/>"
                 paragraph ""
                 paragraph ""
                 paragraph ""
@@ -216,16 +227,20 @@ def deviceList() {
         }
     } else {
         def devices = getDevices()
-        int devicesCount = devices?.size() ?: 0    
-        log.info "$devicesCount YoLink devices were found"   
-        
-        // Clear previous exposed selections here to force refresh:
-        settings.exposed = []
-        
+        int devicesCount = devices?.size() ?: 0
+        log.info "$devicesCount YoLink devices were found"
+
         dynamicPage(name: "deviceList", title: sectionTitle("$devicesCount YoLink devices found. Select the devices you want available to Hubitat"), uninstall: false) {
+            if (state.hubError) {
+                section("") {
+                    paragraph boldRedTitle("Could not read the device list from the Local Hub: ${state.hubError}")
+                    paragraph "Clicking 'Next' will not change your existing devices until the hub can be reached."
+                }
+            }
             section("") {
                 paragraph "Click below to see the list of devices available from your Local Hub"
                 input(name: "exposed", title:"", type: "enum", description: "Click to choose", options: devices, multiple: true, submitOnChange: true)
+                paragraph "Drivers published for: ${SUPPORTED_TYPES.join(', ')}. Other types are listed, but need a matching 'YoLink &lt;type&gt; Device Local' driver installed; any that fail are reported on the next page."
                 paragraph "Note: Clicking 'Next' will create the selected devices and/or delete the deselected devices."
             }
         }
@@ -249,17 +264,29 @@ def diagnostics() {
 
     def errData = ""
     state.errors = ""
+    state.createErrors = []
 
-    def Keep_Hubitat_dni = ""
+    List keepDnis = []
     int countNewChildDevices = 0
     int devicesCount = exposed ? exposed.size() : 0
 
     log.info "$devicesCount devices were selected"
 
-    // Refresh hub info if missing
-    if (!state.hubInfo) {
-        log.info "Hub info missing, fetching devices from Local API..."
+    // Refresh the device catalog if it is missing (e.g. after a hub reboot)
+    if (!(state.deviceType instanceof Map) || state.deviceType.isEmpty()) {
+        log.info "Device list missing, fetching devices from Local API..."
         getDevices()
+    }
+
+    // Without a fresh device list from the hub (the Devices page read failed, or the catalog is empty)
+    // we cannot tell selected from unselected devices, so change nothing — whatever is selected
+    if (state.hubError || !(state.deviceType instanceof Map) || state.deviceType.isEmpty()) {
+        String msg = "The Local Hub device list could not be read (${state.hubError ?: 'no devices returned'}). No devices were created or deleted."
+        log.error msg
+        state.errors = msg
+        return dynamicPage(name: "diagnostics", title: pageTitle("YoLink Diagnostics"), uninstall: false, nextPage: "finish") {
+            section("") { paragraph boldRedTitle(msg) }
+        }
     }
 
     if (devicesCount > 0) {
@@ -268,11 +295,16 @@ def diagnostics() {
             def devtype  = state.deviceType."${dni}"
             def devtoken = state.deviceToken."${dni}"
             def devId    = state.deviceId."${dni}"
+            if (!devtype || !devId) {
+                state.createErrors = (state.createErrors ?: []) + "Selected device ${dni} is no longer reported by the Local Hub; skipped."
+                if (getChildDevice(dni.toString())) keepDnis << dni.toString()   // keep the existing device rather than deleting it
+                return
+            }
             def Hubitat_dni = "yolink_${devtype}_${dni}"
 
             Hubitat_dni = create_yolink_device(Hubitat_dni, devname, devtype, devtoken, devId)
             if (Hubitat_dni != null) {
-                Keep_Hubitat_dni += Hubitat_dni
+                keepDnis << Hubitat_dni.toString()
                 countNewChildDevices++
                 logDebug { "Created $countNewChildDevices of ${exposed.size()} selected devices." }
             }
@@ -282,15 +314,19 @@ def diagnostics() {
         def mqttDni       = "yolink_MQTT Listener_${settings.Client_ID}MQTT1"
         def listenerDevId = "${settings.Client_ID}MQTT1"
         def listener = create_yolink_device(mqttDni, "YoLink Listener", "MQTT Listener", "${settings.Client_ID}MQTT1", listenerDevId)
-        if (listener != null) Keep_Hubitat_dni += listener
+        if (listener != null) keepDnis << listener.toString()
     }
 
-    // Remove unselected devices
+    // Remove unselected devices (exact DNI match)
     getChildDevices().each {
-        if (!Keep_Hubitat_dni.contains(it.deviceNetworkId)) {
+        if (!keepDnis.contains(it.deviceNetworkId?.toString())) {
             log.debug "Device ${it} (${it.deviceNetworkId}) is no longer selected. Deleting."
             deleteChildDevice(it.deviceNetworkId)
         }
+    }
+
+    if (state.createErrors) {
+        state.createErrors.each { errData = appendData(errData, it) }
     }
 
     // Write error data if any
@@ -333,32 +369,33 @@ def diagnostics() {
 }
 
 
-def finish() {    
-    if (reset == "True") {
-        getChildDevices().each { it.reset() }
-    }  
+def finish() {
+    try {
+        def body = JsonOutput.toJson(name:diagFile,type:"file")
+        httpPost([
+            uri: "http://127.0.0.1:8080",
+            path: "/hub/fileManager/delete",
+            contentType:"text/plain",
+            requestContentType:"application/json",
+            body: body,
+            timeout: 10
+        ]) { resp -> /* ignore */ }
+    } catch (e) {
+        logDebug { "Delete ${diagFile} failed (ok if first run): ${e?.message}" }
+    }
 
-    body = JsonOutput.toJson(name:diagFile,type:"file")
-    httpPost([
-        uri: "http://127.0.0.1:8080",
-        path: "/hub/fileManager/delete",
-        contentType:"text/plain",
-        requestContentType:"application/json",
-        body: body
-    ]) {resp}    
-      
         diagData = ""
         def date = new Date(now()).format("MM/dd/yyyy hh:mm:ss a")
         diagData = appendData(diagData,"YoLink Device Service Diagnostics - Collected $date")
-        diagData = appendData(diagData, "App Version " + get_APP_VERSION()) 
-        def devices = getDevices() 
-        int deviceCount = devices.size()  
+        diagData = appendData(diagData, "App Version " + get_APP_VERSION())
+        // Use the device list already fetched on the Devices page rather than hitting the hub again
+        int deviceCount = (state.deviceName instanceof Map) ? state.deviceName.size() : 0
         diagData = appendData(diagData, "YoLink Hub (Subnet ID: ${settings.subnetId}) reported $deviceCount devices:")
         // populate and write file
-        writeFile(diagFile, diagData)   
+        writeFile(diagFile, diagData)
 
-    dynamicPage(name: "finish", title: pageTitle("Processing Complete"), install: true) {  
-        if (state.errors != "") {
+    dynamicPage(name: "finish", title: pageTitle("Processing Complete"), install: true) {
+        if (state.errors) {
             section(boldRedTitle("The installation returned the following error(s):")) {
                 paragraph "${state.errors}"
             }  
@@ -370,7 +407,7 @@ def finish() {
 // lifecycle handlers
 def installed() {
     log.info "${get_APP_NAME()} app installed."
-    subscribe(location, "systemStart", initialize)
+    subscribe(location, "systemStart", systemStart)
     runIn(5, initialize)
 }
 
@@ -391,9 +428,18 @@ def initialize() {
     state.reconcileInProgress = false
     state.reconcileQueue = []
     state.unknownWarned = [:]   // reset the “warned” throttle map
+    state.remove("Client_Secret")   // no longer kept in app state (read from settings when needed)
+
+    // Scheduled after unschedule() above so it is not cancelled
+    if (settings?.debugging == "True") runIn(1800, "debugOff")
 
     scheduleReconcile()
     runIn(3, "runImmediateReconcile")
+}
+
+void debugOff() {
+    log.warn "${get_APP_NAME()}: debug logging disabled"
+    app.updateSetting("debugging", [value: "False", type: "enum"])
 }
 
    
@@ -463,6 +509,12 @@ String refreshDeviceTokenFor(String devId) {
     return state?.deviceToken?."${devId}"?.toString()
 }
 
+// === Child Accessor: MQTT Listener pulls broker credentials here instead of keeping the secret in device state ===
+Map getMqttCredentials() {
+    return [clientId: settings?.Client_ID?.trim(), clientSecret: settings?.Client_Secret?.trim(),
+            subnetId: settings?.subnetId?.trim(), localHubIP: settings?.localHubIP?.trim()]
+}
+
 // Use the YoLink deviceId as the child DNI (required for MQTT routing).
 // Also migrates any legacy child whose DNI != deviceId by deleting/recreating it.
 private create_yolink_device(Hubitat_dni, devname, devtype, devtoken, devId) {
@@ -475,7 +527,7 @@ private create_yolink_device(Hubitat_dni, devname, devtype, devtoken, devId) {
     if (devtype == "Finger") drivername = "Finger"
     if (devtype == "GarageDoor") drivername = "GarageDoor"
     if (devtype == "LeakSensor") drivername = "LeakSensor"
-    if (devtype == "LeakSensor3") drivername = "LeakSensor3"
+    if (devtype == "LeakSensor3") drivername = "LeakSensor"   // LeakSensor driver handles both (supportChangeMode)
     if (devtype == "Lock") drivername = "Lock"
     if (devtype == "LockV2") drivername = "Lock"
     if (devtype == "Manipulator") drivername = "Manipulator"
@@ -542,11 +594,15 @@ drivername = getYoLinkDriverName(drivername)
             dev = addChildDevice("almulder", drivername, desiredDni, null, [label: labelName, isComponent: false])
         } catch (Exception e) {
             log.error "Error adding device '${labelName}': ${e}"
+            String why = (e?.toString()?.contains("UnknownDeviceType")) ?
+                "driver '${drivername}' is not installed (device type ${devtype} may not be supported yet)" : "${e}"
+            state.createErrors = (state.createErrors ?: []) + "Could not create '${labelName}': ${why}"
             return null
         }
     }
 
-    // Initialize/update child
+    // Initialize/update child. Only the MQTT Listener needs broker credentials, and it reads
+    // them from the app (getMqttCredentials) rather than keeping them in device state.
     try {
         dev.ServiceSetup(
             desiredDni,
@@ -556,8 +612,8 @@ drivername = getYoLinkDriverName(drivername)
             devtoken,
             devId,
             settings.localHubIP,
-            settings.Client_ID,
-            settings.Client_Secret
+            null,
+            null
         )
         try { dev.temperatureScale(settings.temperatureScale) } catch (ignored) {}
         // Do NOT push date format; drivers pull via parent.getDateTimeFormat()
@@ -570,44 +626,48 @@ drivername = getYoLinkDriverName(drivername)
     return desiredDni
 }
 
-def getDeviceToken(dni) {
+// Returns the device's current token (or null), and pushes it into the app's cache and the child driver.
+def getDeviceToken(dni, boolean pushToChild = true) {
     def body = [:]
-    body.put("method", "Home.getDeviceList") 
+    body.put("method", "Home.getDeviceList")
 
-    log.info "Polling Local API to retrieve device tokens..."   
-    
-    try {         
+    log.info "Polling Local API to retrieve device tokens..."
+
+    try {
         def object = pollAPI(body,"YoLink Device Local Service","App")
-         
-        if (object) {
-            def responseValues=[]              
-            if (object.data.devices instanceof Collection) { 
-                responseValues=object.data.devices           
-                logDebug { "Parsing multiple devices: ${responseValues}" }
-            } else {
-                responseValues[0]=object.data.devices                    
-                logDebug { "Parsing single device: ${responseValues}" }
-            }                
-                
-            for (def device : responseValues) {               
-                if (device.deviceId == dni) {
+
+        if (object?.code == "000000" && object?.data?.devices != null) {
+            def responseValues = (object.data.devices instanceof Collection) ? object.data.devices : [object.data.devices]
+            logDebug { "Parsing ${responseValues.size()} device(s) for token of ${dni}" }
+
+            for (def device : responseValues) {
+                if (device?.deviceId == dni) {
                     logDebug { "Located ${device.name}" }
-                    def child = findChild(dni)
-                    child.setDeviceToken(device.token)
-                    state.deviceToken[dni] = device.token 
-                    break
+                    Map tokens = (state.deviceToken instanceof Map) ? state.deviceToken : [:]
+                    tokens[dni] = device.token
+                    state.deviceToken = tokens
+                    // Skipped when called from pollAPI: that runs inside the child's own poll, and the
+                    // child picks the new token up via getDeviceTokenFor() when pollAPI returns.
+                    def child = pushToChild ? findChild(dni) : null
+                    if (child) {
+                        try {
+                            child.setDeviceToken(device.token)
+                        } catch (Exception e) {
+                            log.warn "getDeviceToken: could not update token on ${child.displayName}: ${e}"
+                        }
+                    }
+                    return device.token
                 }
             }
-        } else {                
-            log.error "getDeviceToken failed"                
-        } 
-    } catch (groovyx.net.http.HttpResponseException e) {
+            log.warn "getDeviceToken: device ${dni} was not found in the Local Hub device list"
+        } else {
+            log.error "getDeviceToken failed (code=${object?.code})"
+        }
+    } catch (Exception e) {
         log.error "Error executing getDeviceToken, Exception: $e"
-        if (e?.statusCode == UNAUTHORIZED()) { 
-            log.warn "Unauthorized Request. Ensure your access credentials match those in your YoLink mobile app"
-        }         
     }
-} 
+    return null
+}
 
 
 def pollDevices() {
@@ -650,18 +710,13 @@ def reconcileNextDevice() {
         try {
             boolean invoked = false
 
-            // Try the most specific call your drivers support
-            try { dev.pollDevice(0); invoked = true } catch (ignored) {}
-
-            if (!invoked) {
-                try { dev.poll(true); invoked = true } catch (ignored) {}
-            }
-            if (!invoked) {
-                try { dev.poll(); invoked = true } catch (ignored) {}
-            }
-            if (!invoked) {
-                try { dev.refresh(); invoked = true } catch (ignored) {}
-            }
+            // Try the most specific call your drivers support. Only fall through to the next
+            // method when the driver does not have this one; any other failure counts as "invoked"
+            // so the device is not polled twice.
+            invoked = tryReconcileCall(dev) { dev.pollDevice(0) }
+            if (!invoked) invoked = tryReconcileCall(dev) { dev.poll(true) }
+            if (!invoked) invoked = tryReconcileCall(dev) { dev.poll() }
+            if (!invoked) invoked = tryReconcileCall(dev) { dev.refresh() }
 
             logDebug { "Reconcile: ${dev.displayName} -> ${invoked ? 'invoked' : 'no suitable method'}" }
         } catch (e) {
@@ -684,6 +739,23 @@ def reconcileNextDevice() {
     } else {
         state.reconcileInProgress = false
         logDebug { "Reconcile: finished all devices." }
+    }
+}
+
+// true = the method exists and was called (even if it then failed); false = driver has no such method
+private boolean tryReconcileCall(dev, Closure call) {
+    try {
+        call()
+        return true
+    } catch (MissingMethodException ignored) {
+        return false
+    } catch (IllegalArgumentException ignored) {
+        return false      // how Hubitat can report an unknown command on a device wrapper
+    } catch (Exception e) {
+        String m = e?.message ?: ""
+        if (m.contains("No signature of method") || m.contains("not supported")) return false
+        log.warn "Reconcile: ${dev?.displayName} poll failed: ${e}"
+        return true
     }
 }
 
@@ -774,47 +846,55 @@ def AuthToken() {state.access_token}
 
 def refreshAuthToken() {   
     logDebug { "Refreshing access token (Local API)" }
-    boolean rc = false    
-            
-    state?.Client_ID = Client_ID.trim()
-    state?.Client_Secret = Client_Secret.trim()
-    state?.localHubIP = settings.localHubIP?.trim()
-    
-    state.remove("access_token")  // Remove any old token  
- 
-    if (!state.localHubIP || !state.Client_ID || !state.Client_Secret) {
+    boolean rc = false
+
+    String clientId     = settings?.Client_ID?.trim()
+    String clientSecret = settings?.Client_Secret?.trim()
+    state.Client_ID     = clientId
+    state.remove("Client_Secret")   // never keep the secret in app state
+    state.localHubIP    = settings?.localHubIP?.trim()
+
+    // Keep the current token until a new one arrives, so a failed refresh doesn't strand callers
+    state.lastTokenAttemptMs = now()
+
+    if (!state.localHubIP || !clientId || !clientSecret) {
         state.token_error = "Missing Local Hub IP, Client ID, or Client Secret."
         log.error state.token_error
         return false
     }
     def url = "http://${state.localHubIP}:1080/open/yolink/token"
     def headers = ["Content-Type": "application/x-www-form-urlencoded"]
-    def body = "grant_type=client_credentials&client_id=${state.Client_ID}&client_secret=${state.Client_Secret}"
+    def body = "grant_type=client_credentials&client_id=${URLEncoder.encode(clientId, 'UTF-8')}&client_secret=${URLEncoder.encode(clientSecret, 'UTF-8')}"
 
     logDebug { "Attempting to get local access token from ${url}" }
-    
-    try {     
+
+    try {
         httpPost([
             uri: url,
             headers: headers,
             body: body,
             requestContentType: "application/x-www-form-urlencoded",
             timeout: 10
-        ]) { resp ->                     
+        ]) { resp ->
             if (resp.status == 200 && resp.data?.access_token) {
                 logDebug { "Local API Response: SUCCESS" }
-                state.access_token     = resp.data.access_token                    
-                state.access_token_ttl = resp.data?.expires_in                    
-                logDebug { "New local access token = ${state.access_token}" }
+                state.access_token     = resp.data.access_token
+                state.access_token_ttl = resp.data?.expires_in
+                Long ttl = null
+                try { ttl = (resp.data?.expires_in as Long) } catch (ignored) {}
+                if (ttl && ttl > 0) state.tokenExpiresAt = now() + (ttl * 1000L)
+                logDebug { "New local access token received (expires in ${ttl ?: 'unknown'}s)" }
+                state.remove("token_error")
                 rc = true
-            } else { 
+            } else {
                 state.token_error = "Local API token request failed (HTTP ${resp.status})"
                 log.error state.token_error
             }
         }
     } catch (groovyx.net.http.HttpResponseException e) {
-        if (e?.statusCode == 401) { 
-            log.warn "Unauthorized Request. Ensure Client ID/Client Secret are correct."
+        if (e?.statusCode == 401) {
+            state.token_error = "Unauthorized (HTTP 401). Ensure Client ID/Client Secret are correct."
+            log.warn state.token_error
         } else {
             state.token_error = "Error refreshing access token, Exception: ${e.message}"
             log.error state.token_error
@@ -829,8 +909,30 @@ def refreshAuthToken() {
 }
 
 def findChild(dni) {
-    return allChildDevices.find {it.deviceNetworkId.contains(dni)}        
-}    
+    return getChildDevice("${dni}") ?: allChildDevices.find { it.deviceNetworkId == "${dni}" }
+}
+
+// Refresh the access token shortly before it expires, or if we have none.
+// Returns false when there is no usable token (caller should not send the request).
+private boolean ensureAccessToken() {
+    Long exp = state.tokenExpiresAt as Long
+    if (!state.access_token || (exp && now() > exp - 60000L)) {
+        logDebug { "Access token missing or about to expire; refreshing" }
+        refreshAuthTokenThrottled()
+    }
+    return state.access_token != null
+}
+
+// Automatic refreshes are limited to one attempt per minute, so a hub that is down doesn't
+// get a token request on every poll. The setup pages call refreshAuthToken() directly.
+private boolean refreshAuthTokenThrottled() {
+    Long last = state.lastTokenAttemptMs as Long
+    if (last && now() - last < 60000L) {
+        logDebug { "Token refresh skipped (last attempt ${Math.round((now() - last) / 1000)}s ago)" }
+        return false
+    }
+    return refreshAuthToken()
+}
 
 String pageTitle (String txt) { return '<h2>'+txt+'</h2>'}
 String sectionTitle(String txt) { return '<h3>'+txt+'</h3>'}
@@ -840,8 +942,10 @@ String boldTitle(String txt) { return '<b>'+txt+'</b>'}
 String boldRedTitle(String txt) { return '<span style="color:#ff0000"><b>'+txt+'</b></span>'}
 
 def getDevices() {
+    state.remove("hubError")
     if (!settings.localHubIP || !state.access_token) {
-        log.error "Missing Local Hub IP or access token."
+        state.hubError = "Missing Local Hub IP or access token."
+        log.error state.hubError
         return [:]
     }
 
@@ -865,13 +969,20 @@ def getDevices() {
             respData = resp?.data
         }
     } catch (groovyx.net.http.HttpResponseException e) {
-        log.error "Error polling hub: ${e.statusCode} ${e.message}"
+        state.hubError = "HTTP ${e.statusCode} ${e.message}"
+        log.error "Error polling hub: ${state.hubError}"
         if (e?.statusCode == 401) log.warn "Unauthorized - check your access token"
+        return [:]
+    } catch (Exception e) {
+        // Hub offline, timeout, connection refused, etc.
+        state.hubError = "${e.message ?: e}"
+        log.error "Error polling hub: ${state.hubError}"
         return [:]
     }
 
     if (!respData?.data?.devices) {
-        log.error "No devices returned from hub"
+        state.hubError = "No devices returned from hub" + (respData?.code ? " (code ${respData.code})" : "")
+        log.error state.hubError
         return [:]
     }
 
@@ -917,22 +1028,30 @@ def getDevices() {
 def pollAPI(body, name=null, type=null){
     def rc=null
     def retry=3
-    logDebug { "pollAPI(${body})" }
-        
-    while ((rc == null) && (retry>0)) {      
+    boolean deviceTokenRefreshed = false
+    boolean authRetried = false
+    // Never log the body/params as-is: they carry the device token and the bearer token
+    logDebug { "pollAPI(method=${body?.method}, target=${body?.targetDevice ?: '-'})" }
+
+    if (!ensureAccessToken()) {
+        log.warn "pollAPI(${body?.method}): no access token available (${state.token_error ?: 'token request failed'}); skipping request"
+        return null
+    }
+
+    while ((rc == null) && (retry>0)) {
         def headers = ["Authorization": "Bearer ${state.access_token}"]
         def Params = [
             uri     : apiURL(),
             headers : headers,
-            body    : body 
-        ]     
-        
-        logDebug { "Attempting to poll Local API using parameters: ${Params}" }
-        
-        try {     
+            body    : body,
+            timeout : 15
+        ]
+
+        try {
             httpPostJson(Params) { resp ->
                 if (resp.data) {                    
-                    logDebug { "API Response: ${resp.data}" }
+                    // Home.getDeviceList responses carry every device token, so don't dump those
+                    logDebug { (body?.method == "Home.getDeviceList") ? "API Response: code=${resp.data?.code}" : "API Response: ${resp.data}" }
                     def object = resp.data
                     def code = object.code                  
                     def desc = object.desc  
@@ -961,19 +1080,28 @@ def pollAPI(body, name=null, type=null){
                              break;
                         
                         case "000103":
-                             if (retry>0) {
-                                  log.error "${name}'s device token is invalid, refreshing..."
-                                  getDeviceToken(body.targetDevice)
-                                  body.token = state.deviceToken[body.targetDevice]
-                                  retry = 1
+                             // Refresh the device token once; give up (returning the error) if it is still invalid
+                             def newToken = null
+                             if (!deviceTokenRefreshed && body?.targetDevice) {
+                                  deviceTokenRefreshed = true
+                                  log.warn "${name}'s device token is invalid, refreshing..."
+                                  newToken = getDeviceToken(body.targetDevice, false)
                              }
-                             break;       
+                             if (newToken) {
+                                  body.token = newToken
+                                  retry--
+                             } else {
+                                  log.error "${name}'s device token is invalid and could not be refreshed."
+                                  rc = object
+                                  retry = -1
+                             }
+                             break;
                         
                         case "010104":
                              if (retry>0) {
                                 retry--
                                 logDebug { 'Request token expired. Refreshing and retry...' }
-                                refreshAuthToken()                                         
+                                if (!refreshAuthTokenThrottled()) { log.error "Request token expired and could not be refreshed."; rc = object; retry = -1 }
                              } else {          
                                 log.error "Request token expired and retry failed."
                                 retry = -1
@@ -986,15 +1114,25 @@ def pollAPI(body, name=null, type=null){
                              break;
                    }
                 } else {
-                     log.error "Polling of Local API failed: No response returned" 
-                     rc = object                     
-                }  
+                     log.error "Polling of Local API failed: No response returned"
+                     retry = -1
+                }
+            }
+        } catch (groovyx.net.http.HttpResponseException e) {
+            if (e?.statusCode == UNAUTHORIZED() && !authRetried) {
+                // Access token expired/revoked: refresh once and retry
+                authRetried = true
+                log.warn "Local API returned HTTP 401; refreshing access token and retrying..."
+                if (!refreshAuthTokenThrottled()) retry = -1
+            } else {
+                log.error "pollAPI() HTTP error: ${e?.statusCode} ${e?.message}"
+                retry = -1
             }
         } catch (Exception e) {
             log.error "pollAPI() Exception: $e"
             retry = -1
         }
-    }  
+    }
     return rc
 }
 
@@ -1050,10 +1188,13 @@ def translateCode(code) {
     "4":100
 ]
 
+// YoLink reports battery as a 0-4 level. Returns the percentage, or null when the level is
+// missing or not recognised (callers then leave the battery attribute unchanged).
 def batterylevel(level) {
-    if (!level) return 0
-    def battery = batteryLevels["${level}"]
-    return battery ?: -1
+    if (level == null || level.toString().trim() == "") return null
+    Integer idx = null
+    try { idx = (level.toString().trim() as BigDecimal).intValue() } catch (ignored) { return null }
+    return batteryLevels["${idx}"]
 }
 
 def relayState(value) {    
@@ -1066,22 +1207,31 @@ def relayState(value) {
 }
  
 def convertTemperature(temperature, scale=null) {
-    def temperatureScale = scale ?: settings.temperatureScale
-    
-    if (temperatureScale == "F") {
-        return celsiustofahrenheit(temperature).toDouble().round(1)        
-    } else { 
-        if (temperatureScale == "C") {
-            return temperature
-        } else {    
-            log.error "convertTemperature(): Temperature scale (${temperatureScale}) is invalid"
-            return "error"
-        }      
-    }    
+    if (temperature == null) return null
+    def temperatureScale = scale ?: temperatureScale()
+    BigDecimal t
+    try { t = temperature as BigDecimal } catch (e) {
+        log.error "convertTemperature(): '${temperature}' is not a number"
+        return null
+    }
+
+    if (temperatureScale == "C") return t
+    if (temperatureScale != "F") log.warn "convertTemperature(): Temperature scale (${temperatureScale}) is invalid; using F"
+    return celsiustofahrenheit(t).toDouble().round(1)
+}
+
+// Converts a temperature *difference* (e.g. a calibration offset): no +32 offset
+def convertTemperatureDelta(delta, scale=null) {
+    if (delta == null) return null
+    def temperatureScale = scale ?: temperatureScale()
+    BigDecimal d
+    try { d = delta as BigDecimal } catch (e) { return null }
+    if (temperatureScale == "C") return d
+    return (d * 9 / 5).toDouble().round(1)
 }
 
 def temperatureScale() {
-    return settings.temperatureScale
+    return settings?.temperatureScale ?: "F"
 }
     
 def celsiustofahrenheit(celsius) {return ((celsius * 9 / 5) + 32)} 
@@ -1229,8 +1379,11 @@ private boolean shouldRunReconcile(Boolean force = false) {
     long lastMs = (state.lastReconcileRunMs ?: 0L) as long
     if (lastMs <= 0L) return true
 
+    // The cron/runEvery job already sets the cadence; this guard only skips a scheduled run that lands
+    // close behind another reconcile (e.g. one forced by an app save). Using half the cadence means a
+    // few ms of scheduler drift can no longer make a run skip its slot.
     long elapsedMs = now() - lastMs
-    long minMs = (minSeconds as long) * 1000L
+    long minMs = ((minSeconds as long) * 1000L).intdiv(2L)
     if (elapsedMs < minMs) {
         logDebug { "Reconcile skipped: elapsed ${Math.round(elapsedMs/1000)}s < cadence ${minSeconds}s (${cad})" }
         return false
@@ -1310,7 +1463,7 @@ def getTHSensorDriver(name, type, token, devId) {
             log.error "No response from Local API request"
         }
     } catch (groovyx.net.http.HttpResponseException e) {
-        if (e?.statusCode == UNAUTHORIZED_CODE) {
+        if (e?.statusCode == UNAUTHORIZED()) {
             log.error("getTHSensorDriver() - Unauthorized Exception")
         } else {
             log.error("getTHSensorDriver() - Exception $e")
@@ -1350,7 +1503,7 @@ def getLeakSensorDriver(name,type,token,devId) {
             log.error "No response from Local API request"
         } 
     } catch (groovyx.net.http.HttpResponseException e) {
-        if (e?.statusCode == UNAUTHORIZED_CODE) { 
+        if (e?.statusCode == UNAUTHORIZED()) { 
             log.error("getLeakSensorDriver() - Unauthorized Exception")
         } else {
             log.error("getLeakSensorDriver() - Exception $e")

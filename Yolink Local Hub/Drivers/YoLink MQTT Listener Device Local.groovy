@@ -2,15 +2,31 @@
  *  YoLink™ MQTT Listener (Local API Edition)
  *  © 2025 Albert Mulder
  *
+ *  1.2.0 - Audit fixes: reset keeps subnet/hub IP so MQTT keeps working; watchdog re-subscribes and
+ *          reconnects a silent connection; reconnects back off (30s up to 10 min) and no longer drop a
+ *          healthy connection; stopped re-injecting cached fields into partial messages (replayed old
+ *          alerts) and caching unselected devices; broker secret read from the app instead of device
+ *          state; no forced isStateChange events; per-message timestamp kept in memory; debug logging
+ *          turns itself off after 30 minutes. Silent-connection reconnect after 6h (was 3h); a reconnect
+ *          already pending is not rescheduled (backoff no longer doubles twice per failure).
  *  1.1.1 - Updated for HPM
  *  1.1.0 - Initial working driver
  */
 
 import groovy.json.JsonSlurper
+import groovy.transform.Field
+import java.util.concurrent.ConcurrentHashMap
 
-def clientVersion() { "1.1.1" }
+def clientVersion() { "1.2.0" }
 def copyright()     { "© 2025 Albert Mulder" }
 def driverName()    { "YoLink™ MQTT Listener (Local API Edition)" }
+
+// Last MQTT message time per device id, kept in memory so each message doesn't rewrite device state
+@Field static ConcurrentHashMap<String, Long> lastMsgTs = new ConcurrentHashMap<String, Long>()
+
+@Field static final int RECONNECT_MIN_SECS = 30
+@Field static final int RECONNECT_MAX_SECS = 600
+@Field static final long STALE_MS = 6L * 60L * 60L * 1000L   // no messages for 6h => reconnect
 
 /* ============================ Preferences ============================ */
 preferences {
@@ -22,7 +38,7 @@ preferences {
                           <b>Temperature Scale:</b> ${activeScale()}<br>
                           <b>Date/Time Format:</b> ${activeFmt()}<br><br>
                           ${copyright()}"""
-    input name: "debug", type: "bool", title: "Enable debug logging", defaultValue: false
+    input name: "debug", type: "bool", title: "Enable debug logging (turns off after 30 minutes)", defaultValue: false
 }
 
 /* ============================== Metadata ============================= */
@@ -57,13 +73,15 @@ def temperatureScale(String scale = null) {
 
 void setDeviceToken(token) {
     if (state.token != token) {
-        logDebug("Device token changed from '${state.token}' to '${token}'")
+        logDebug("Device token changed")
         state.token = token
     } else {
-        logDebug("Device token unchanged: '${state.token}'")
+        logDebug("Device token unchanged")
     }
 }
 
+// clientId/clientSecret parameters are kept for compatibility but no longer stored:
+// the broker credentials are read from the parent app at connect time.
 void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, localHubIP=null, clientId=null, clientSecret=null) {
     state.my_dni       = Hubitat_dni
     state.subnetId     = subnetId
@@ -71,25 +89,25 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, loca
     state.type         = devtype
     state.token        = devtoken
     state.devId        = devId
-    state.localHubIP   = localHubIP   ?: parent?.settings?.localHubIP
-    state.clientId     = clientId     ?: parent?.settings?.Client_ID
-    state.clientSecret = clientSecret ?: parent?.settings?.Client_Secret
+    state.localHubIP   = localHubIP   ?: creds()?.localHubIP
+    state.remove("clientSecret")
+    state.remove("clientId")
     rememberState("devId", devId)
 
-    logDebug("ServiceSetup(): subnetId=${state.subnetId}, localHubIP=${state.localHubIP}, clientID=${state.clientId}, secretLen=${state.clientSecret?.length()}")
-    connect()
+    logDebug("ServiceSetup(): subnetId=${state.subnetId}, localHubIP=${state.localHubIP}")
+    // The app calls initialize() right after this, which connects; don't connect twice.
 }
 
 public def getSetup() {
     [
       my_dni: state.my_dni, subnetId: state.subnetId, name: state.name, type: state.type,
-      token: state.token, devId: state.devId, localHubIP: state.localHubIP,
-      clientId: state.clientId, clientSecret: state.clientSecret
+      devId: state.devId, localHubIP: state.localHubIP
     ]
 }
 
 public def isSetup() {
-    return (state.my_dni && state.subnetId && state.name && state.type && state.token && state.devId && state.clientId && state.clientSecret)
+    Map c = creds()
+    return (state.my_dni && state.subnetId && state.name && state.type && state.token && state.devId && c?.clientId && c?.clientSecret)
 }
 
 /* ============================ Lifecycle ============================== */
@@ -104,65 +122,104 @@ def updated() {
     log.info "YoLink MQTT Listener Local Device Updated"
     state.driverVersion = clientVersion()
     state.debug = (settings?.debug == true)
+    if (state.debug) runIn(1800, "logsOff")
+    cleanupLegacyState()
 }
 
 def initialize() {
     log.trace "Initializing: Establishing MQTT connection to YoLink Local API"
+    cleanupLegacyState()
+    state.reconnectDelay = RECONNECT_MIN_SECS
     connect()
     runEvery1Minute(mqttWatchdog)
+    if (state.debug) runIn(1800, "logsOff")
 }
 
 def uninstalled() {
-    interfaces.mqtt.disconnect()
+    unschedule()
+    try { interfaces.mqtt.disconnect() } catch (ignored) {}
     log.warn "MQTT Listener Uninstalled"
+}
+
+void logsOff() {
+    log.warn "${device.displayName}: debug logging disabled"
+    device.updateSetting("debug", [value: "false", type: "bool"])
+    state.debug = false
+}
+
+// Earlier versions cached every device's last payload and the broker secret in state
+private void cleanupLegacyState() {
+    try {
+        List stale = state.keySet().findAll { it?.toString()?.startsWith("lastData_") } as List
+        stale.each { state.remove(it) }
+    } catch (ignored) {}
+    state.remove("clientSecret")
+    state.remove("clientId")
+    state.remove("lastMsgTs")
 }
 
 /* ============================ Poll / Connect ========================= */
 
 def poll() {
     def isConn = interfaces.mqtt.isConnected()
-    rememberState("online", isConn)
+    rememberState("online", isConn.toString())
     logDebug("poll(): MQTT isConnected() = ${isConn}")
     if (isConn) {
         rememberState("MQTT", "connected")
     } else {
-        runIn(1, connect)
+        runIn(1, "reconnectIfNeeded")
     }
 }
 
 def pollDevice(delay=1) {
     poll()
-    sendEvent(name:"lastPoll", value: nowFmt(), isStateChange:true)
+    sendEvent(name:"lastPoll", value: nowFmt())
 }
 
 def logDebug(msg) {
     if (state.debug) log.debug "[${timestamp()}] ${msg}"
 }
 
+private Map creds() {
+    try { return parent?.getMqttCredentials() } catch (ignored) { return null }
+}
+
+// Scheduled/automatic reconnects go through here so a pending retry can't drop a healthy connection
+def reconnectIfNeeded() {
+    if (interfaces.mqtt.isConnected() && state.subscribed) {
+        logDebug("reconnectIfNeeded(): already connected")
+        return
+    }
+    connect()
+}
+
+// Also the "connect" command: always reconnects
 def connect() {
     logDebug("connect(): Preparing MQTT reconnect...")
-    unsubscribe_MQTT()
-    interfaces.mqtt.disconnect()
-    if (!state.clientId || !state.clientSecret) {
-        state.clientId = parent?.settings?.Client_ID
-        state.clientSecret = parent?.settings?.Client_Secret
-        logDebug("connect(): Loaded creds from parent: clientId=${state.clientId}, secretLen=${state.clientSecret?.length()}")
-    }
+    unschedule("reconnectIfNeeded")
+    try { unsubscribe_MQTT() } catch (ignored) {}
+    try { interfaces.mqtt.disconnect() } catch (ignored) {}
+    state.subscribed = false
+
+    Map c = creds()
+    if (!state.subnetId)   state.subnetId   = c?.subnetId
+    if (!state.localHubIP) state.localHubIP = c?.localHubIP
     if (!state.subnetId) {
-        log.error "connect(): subnetId is NULL — cannot subscribe to valid topic!"
+        log.error "connect(): subnetId is NULL — cannot subscribe to valid topic! Re-open the YoLink app and click through to Done."
         return
     }
     def mqtt_ID = "${state.subnetId}_${new Date().format('HHmmss')}_${new Random().nextInt(1000)}"
-    establish_MQTT_connection(mqtt_ID)
+    establish_MQTT_connection(mqtt_ID, c)
 }
 
-def establish_MQTT_connection(mqtt_ID) {
+def establish_MQTT_connection(mqtt_ID, Map c = null) {
     def MQTT = "disconnected"
     try {
-        def brokerIP  = state.localHubIP ?: parent?.settings?.localHubIP
+        c = c ?: creds()
+        def brokerIP  = state.localHubIP ?: c?.localHubIP
         def broker    = "tcp://${brokerIP}:18080"
-        def username  = state.clientId
-        def password  = state.clientSecret
+        def username  = c?.clientId
+        def password  = c?.clientSecret
         def topic     = "ylsubnet/${state.subnetId}/+/report"
         logDebug("MQTT connect: broker=${broker}, mqtt_ID=${mqtt_ID}, username=${username}, secretLen=${password?.length()}, topic=${topic}")
         if (!username || !password) {
@@ -173,16 +230,17 @@ def establish_MQTT_connection(mqtt_ID) {
             log.error "Missing subnetId — cannot subscribe"
             return
         }
-        interfaces.mqtt.connect(broker, mqtt_ID, username, password, cleanSession: 1, keepAlive: 60)
+        interfaces.mqtt.connect(broker, mqtt_ID, username, password, cleanSession: true, keepAlive: 60)
         logDebug("MQTT isConnected() after connect: ${interfaces.mqtt.isConnected()}")
         runInMillis(2000, "delayedSubscribe")
         MQTT = "connected"
     } catch (e) {
         log.error("[${timestamp()}] establish_MQTT_connection() Exception: ${e.getMessage()}")
         if (state.debug) e.printStackTrace()
+        scheduleReconnect()
     } finally {
         rememberState("MQTT", MQTT)
-        rememberState("online", interfaces.mqtt.isConnected())
+        rememberState("online", interfaces.mqtt.isConnected().toString())
         lastResponse("Local API MQTT ${MQTT}")
     }
 }
@@ -193,13 +251,18 @@ def delayedSubscribe() {
         return
     }
     if (!interfaces.mqtt.isConnected()) {
-        logDebug("Skipping subscribe — not connected")
+        logDebug("Skipping subscribe — not connected (watchdog will retry)")
         return
     }
     def topic = "ylsubnet/${state.subnetId}/+/report"
     logDebug("Subscribing to ${topic}, isConnected=${interfaces.mqtt.isConnected()}")
     try {
         interfaces.mqtt.subscribe(topic, 1)
+        state.subscribed = true
+        state.reconnectDelay = RECONNECT_MIN_SECS   // healthy again: reset backoff
+        state.remove("nextReconnectAt")
+        unschedule("reconnectIfNeeded")
+        lastMsgTs[device.id as String] = now()          // start the silence timer from the subscribe
         logDebug("Subscribe complete. Connected? ${interfaces.mqtt.isConnected()}")
     } catch (e) {
         log.error("[${timestamp()}] Subscription error: ${e.getMessage()}")
@@ -214,9 +277,24 @@ def unsubscribe_MQTT() {
         interfaces.mqtt.unsubscribe(topic)
         logDebug("Unsubscribed from ${topic}")
     } catch (e) {
-        log.error("Unsubscribe error: ${e.getMessage()}")
-        if (state.debug) e.printStackTrace()
+        logDebug("Unsubscribe error: ${e.getMessage()}")
     }
+}
+
+// Exponential backoff: 30s, 60s, 120s ... capped at 10 minutes
+private void scheduleReconnect() {
+    // A connect that throws AND posts an error status would otherwise schedule (and double) twice
+    Long pending = state.nextReconnectAt as Long
+    if (pending && now() < pending) {
+        logDebug("Reconnect already scheduled; not rescheduling")
+        return
+    }
+    int delay = ((state.reconnectDelay ?: RECONNECT_MIN_SECS) as int)
+    delay = Math.max(RECONNECT_MIN_SECS, Math.min(RECONNECT_MAX_SECS, delay))
+    state.nextReconnectAt = now() + (delay * 1000L)
+    runIn(delay, "reconnectIfNeeded")
+    state.reconnectDelay = Math.min(RECONNECT_MAX_SECS, delay * 2)
+    logDebug("Reconnect scheduled in ${delay}s")
 }
 
 /* =============================== MQTT =============================== */
@@ -224,56 +302,37 @@ def unsubscribe_MQTT() {
 def mqttClientStatus(String message) {
     logDebug("mqttClientStatus(): ${message}")
     if (message.toLowerCase().startsWith("error")) {
-        log.error("[${timestamp()}] MQTT Error: ${message} | state: subnetId=${state.subnetId}, brokerIP=${state.localHubIP}, clientId=${state.clientId}")
+        // Log loudly only on the first failure of a streak; repeats while backing off are warnings
+        boolean firstFailure = ((state.reconnectDelay ?: RECONNECT_MIN_SECS) as int) <= RECONNECT_MIN_SECS
+        String msg = "[${timestamp()}] MQTT Error: ${message} | state: subnetId=${state.subnetId}, brokerIP=${state.localHubIP}"
+        if (firstFailure) log.error(msg) else log.warn(msg)
         try {
-            log.info "[${timestamp()}] Disconnecting from MQTT (isConnected=${interfaces.mqtt.isConnected()})"
+            logDebug("Disconnecting from MQTT (isConnected=${interfaces.mqtt.isConnected()})")
             interfaces.mqtt.disconnect()
-            sendEvent(name:"MQTT", value: "disconnected", isStateChange:true)
-            state.MQTT = "disconnected"
+            state.subscribed = false
+            rememberState("MQTT", "disconnected")
         } catch (e) {
             log.error("[${timestamp()}] mqttClientStatus(): Disconnect exception: ${e.getMessage()}")
         }
-        runIn(30, connect)
+        scheduleReconnect()
     } else {
         logDebug("MQTT status update (non-error): ${message}")
     }
 }
 
 def parse(message) {
-    state.lastMsgTs = now()
+    lastMsgTs[device.id as String] = now()
     def parsed = interfaces.mqtt.parseMessage(message)
 
     logDebug("MQTT Topic: ${parsed?.topic}")
     logDebug("MQTT Payload: ${parsed?.payload}")
 
-    try {
-        def json = new groovy.json.JsonSlurper().parseText(parsed?.payload)
-        def devId = json?.deviceId
-
-        if (devId && json.data instanceof Map) {
-            if (!state["lastData_${devId}"]) {
-                state["lastData_${devId}"] = [:]
-            }
-            def lastData = state["lastData_${devId}"]
-
-            // Cache all fields, merge new data accordingly
-            json.data.each { key, value ->
-                if (value != null) lastData[key] = value
-            }
-            // Restore missing keys
-            lastData.each { key, value ->
-                if (!json.data.containsKey(key)) json.data[key] = value
-            }
-            // Re-encode enriched JSON payload
-            parsed.payload = groovy.json.JsonOutput.toJson(json)
-        }
-    } catch (e) {
-        logDebug("Failed to parse or enrich MQTT payload: ${e.message}")
-    }
-
+    // Messages are passed through unchanged. Drivers only update the fields a message actually
+    // contains, so partial reports (battery/heartbeat) no longer need older fields merged in —
+    // merging them used to replay stale "alert" states.
     if (parsed?.topic?.startsWith("ylsubnet/${state.subnetId}")) {
-        def device = parent.passMQTT(parsed)
-        if (device) logDebug("Passed MQTT message to device ${device}")
+        def routed = parent.passMQTT(parsed)
+        if (routed) logDebug("Passed MQTT message to device ${routed}")
         else        logDebug("No device matched for MQTT payload.")
     } else {
         logDebug("Received MQTT message not for this subnet ID.")
@@ -285,21 +344,35 @@ def parse(message) {
 def rememberState(name, value, unit=null) {
     if (state."$name" != value) {
         state."$name" = value
-        if (unit==null) sendEvent(name:"$name", value: "$value", isStateChange:true)
-        else            sendEvent(name:"$name", value: "$value", unit: "$unit", isStateChange:true)
+        if (unit==null) sendEvent(name:"$name", value: "$value")
+        else            sendEvent(name:"$name", value: "$value", unit: "$unit")
     }
 }
 
 def reset() {
+    // Keep what is needed to reconnect; everything else is cleared
+    Map c = creds()
+    Map keep = [
+        my_dni    : state.my_dni,
+        subnetId  : state.subnetId ?: c?.subnetId,
+        localHubIP: state.localHubIP ?: c?.localHubIP,
+        name      : state.name,
+        type      : state.type,
+        token     : state.token,
+        devId     : state.devId
+    ]
     state.clear()
+    keep.each { k, v -> if (v != null) state[k] = v }
     state.driverVersion = clientVersion() // keep in state only
+    state.debug = (settings?.debug == true)
+    state.reconnectDelay = RECONNECT_MIN_SECS
     rememberState("firmware", "N/A")
     connect()
     log.warn "Device reset"
 }
 
 def lastResponse(value) {
-    sendEvent(name:"lastResponse", value: "$value", isStateChange:true)
+    sendEvent(name:"lastResponse", value: "$value")
 }
 
 /* ---- Date/Time + Scale helpers (pulled from parent) ---- */
@@ -337,12 +410,26 @@ private String fmtTs(def ts) {
 def mqttWatchdog() {
     def connected = interfaces.mqtt.isConnected()
     if (!connected) {
-        logDebug("MQTT watchdog: Connection is DOWN — triggering reconnect...")
-        connect()
-    } else {
-        if (state.lastMsgTs && now() - state.lastMsgTs > 60000) {
-            logDebug("No MQTT messages for ${(now()-state.lastMsgTs)/1000} seconds — connection may be stale")
+        Long next = state.nextReconnectAt as Long
+        if (next && now() < next) {
+            logDebug("MQTT watchdog: connection DOWN — reconnect already scheduled")
+            return
         }
-        logDebug("MQTT watchdog: connection healthy")
+        logDebug("MQTT watchdog: Connection is DOWN — triggering reconnect...")
+        scheduleReconnect()
+        return
     }
+    if (!state.subscribed) {
+        logDebug("MQTT watchdog: connected but not subscribed — subscribing")
+        delayedSubscribe()
+        return
+    }
+    Long last = lastMsgTs[device.id as String]
+    if (last && now() - last > STALE_MS) {
+        log.info "MQTT watchdog: no messages for ${Math.round((now() - last) / 60000)} minutes — reconnecting"
+        lastMsgTs[device.id as String] = now()
+        connect()
+        return
+    }
+    logDebug("MQTT watchdog: connection healthy")
 }
