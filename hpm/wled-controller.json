@@ -1,0 +1,22 @@
+{
+  "packageName": "WLED Controller",
+  "author": "Albert Mulder",
+  "minimumHEVersion": "2.2.9",
+  "dateReleased": "2026-11-03",
+  "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/WLED",
+  "releaseNotes": "2.0.0 - Based on WLED Device Type by Bryan Li (joyfulhouse). New Control preference: Whole controller (default) turns the controller and all segments on/off and dims master brightness, working with presets that use any number of segments; Single segment keeps per-segment behavior. Fixed the repeating 'Cannot get property on on null object (method parseResp)' error when the configured segment is missing from the controller's reply. Segments are looked up by WLED id, not list position. Fixed the 1 Hour refresh interval polling every minute. Level syncs from the controller. Smaller device state. Color commands no longer crash before the first refresh. Debug logging defaults off with 30-minute auto-off. Removed the Power Off preference. MOVING FROM THE ORIGINAL DRIVER: change each device's Type to WLED Controller, Save Device, then Save Preferences once.",
+  "tags": [
+    "Lights & Switches",
+    "LAN"
+  ],
+  "drivers": [
+    {
+      "id": "a812e0d9-1438-450c-8fff-da66832a41f2",
+      "name": "WLED Controller",
+      "namespace": "almulder",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/WLED/Drivers/WLED%20Controller.groovy",
+      "required": true,
+      "version": "2.0.0"
+    }
+  ]
+}

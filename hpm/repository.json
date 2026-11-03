@@ -40,6 +40,16 @@
       "tags": [
         "Misc. Devices"
       ]
+    },
+    {
+      "name": "WLED Controller",
+      "category": "Control",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/hpm/wled-controller.json",
+      "description": "WLED controller driver: whole-controller on/off, level and presets that work with any number of segments. Fixes the repeating parseResp null error in the original WLED driver.",
+      "tags": [
+        "Lights & Switches",
+        "LAN"
+      ]
     }
   ]
 }
