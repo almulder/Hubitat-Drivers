@@ -6,7 +6,8 @@
  *  no cloud. It speaks Tuya protocol 3.5, so the box can be blocked from the internet
  *  and still be controlled from Hubitat: clean, empty, auto mode, deodorize, infrared
  *  sensor, child lock, clumping time, cleaning interval, bin calibration and litter
- *  leveling. It also reports cat visits as a Motion Sensor.
+ *  leveling. It also reports cat visits as a Motion Sensor, plus the cat's weight
+ *  and how long each visit lasted.
  *
  *  Setup: each box needs its IP address, Device ID and Local Key. The preferences
  *  page explains how to get them. In short:
@@ -36,6 +37,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.2 - 2026-11-04 - Cat weight (lb/kg), last visit duration, visits today and fault status.
  *  0.1.1 - 2026-11-04 - Cat detection: Motion Sensor (active while the cat is at or in the box).
  *  0.1.0 - 2026-11-04 - Initial build: local Tuya 3.5 control of the litter box.
  */
@@ -49,7 +51,7 @@ import java.security.SecureRandom
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 
-@Field static final String DRIVER_VERSION = "0.1.1"
+@Field static final String DRIVER_VERSION = "0.1.2"
 
 // Setup help shown on the preferences page
 @Field static final String HELP_IP = "The box's IP address on your network. Find it in your router's client list, and give it a fixed/reserved IP so it never changes."
@@ -63,6 +65,11 @@ import groovy.json.JsonOutput
 Copy the key exactly; it is 16 characters and often contains symbols. Re-pairing or resetting the box in the app changes the key."""
 
 // Litter box data points (mapped from the SmartLife app, model "Smart Cat Litter Box 04 ZY")
+@Field static final String DP_WEIGHT_G   = "6"     // cat weight in grams (same reading as DP 129)
+@Field static final String DP_VISITS     = "7"     // visits today (Tuya spec; only sent by some boxes)
+@Field static final String DP_VISIT_SEC  = "8"     // last visit duration, seconds
+@Field static final String DP_FAULT      = "22"    // fault bitmap: motor, program, g-sensor
+@Field static final String DP_WEIGHT_LB  = "129"   // cat weight in lb x 100
 @Field static final String DP_CLEAN      = "101"   // on starts a clean; switches Auto off
 @Field static final String DP_EMPTY      = "102"   // dump all litter
 @Field static final String DP_CAT        = "104"   // cat detected (approached/inside); read-only
@@ -104,6 +111,10 @@ metadata {
         attribute "infraredSensor", "enum", ["on", "off"]
         attribute "childLock", "enum", ["on", "off"]
         attribute "deodorizing", "enum", ["on", "off"]
+        attribute "catWeight", "number"         // lb or kg, per the Weight unit preference
+        attribute "lastVisitDuration", "number" // seconds
+        attribute "visitsToday", "number"
+        attribute "fault", "string"             // none, or e.g. "motor, g-sensor"
         attribute "clumpingTime", "number"      // minutes
         attribute "cleaningInterval", "number"  // minutes
         attribute "binCalibration", "number"
@@ -131,6 +142,7 @@ metadata {
         input name: "devId",     type: "text",   title: "Device ID", description: HELP_KEYS, required: true
         input name: "localKey",  type: "text",   title: "Local Key", description: "16 characters, from the Tuya cloud project (see Device ID above).", required: true
         input name: "pollSec",   type: "number", title: "Poll interval (seconds)", defaultValue: 60
+        input name: "weightUnit", type: "enum",  title: "Weight unit", options: ["lb", "kg"], defaultValue: "lb"
         input name: "txtEnable", type: "bool",   title: "Enable description logging", defaultValue: true
         input name: "debugLog",  type: "bool",   title: "Enable debug logging", description: "Turns itself off after 30 minutes.", defaultValue: false
     }
@@ -430,6 +442,7 @@ private updateAttributesFromDps(Map dps) {
      (DP_INFRARED): "infraredSensor", (DP_CHILD_LOCK): "childLock", (DP_DEODORIZE): "deodorizing"].each { dp, attr ->
         if (last[dp] != null) sendEvent(name: attr, value: last[dp] ? "on" : "off")
     }
+    updateVisitAttributes(last)
     if (last[DP_CAT] != null) {
         String m = last[DP_CAT] ? "active" : "inactive"
         sendEvent(name: "motion", value: m, descriptionText: "${device.displayName}: cat ${m == 'active' ? 'detected' : 'left'}")
@@ -437,6 +450,33 @@ private updateAttributesFromDps(Map dps) {
     [(DP_CLUMP_MIN): "clumpingTime", (DP_INTERVAL): "cleaningInterval",
      (DP_BIN_CAL): "binCalibration", (DP_LEVELING): "litterLeveling"].each { dp, attr ->
         if (last[dp] != null) sendEvent(name: attr, value: last[dp] as Integer)
+    }
+}
+
+// Weight, last visit, visits today and fault. The box reports the weight twice:
+// DP 6 in grams and DP 129 in lb x 100. Use the one in the chosen unit, converting
+// from the other only when it is missing.
+private updateVisitAttributes(Map last) {
+    boolean kg = (settings.weightUnit == "kg")
+    BigDecimal g  = (last[DP_WEIGHT_G] != null)  ? (last[DP_WEIGHT_G] as BigDecimal) : null
+    BigDecimal lb = (last[DP_WEIGHT_LB] != null) ? (last[DP_WEIGHT_LB] as BigDecimal) / 100 : null
+    BigDecimal w = null
+    if (kg) w = (g != null) ? g / 1000 : (lb != null ? lb * 0.45359237 : null)
+    else    w = (lb != null) ? lb : (g != null ? g / 453.59237 : null)
+    if (w != null && w > 0) {
+        sendEvent(name: "catWeight", value: w.setScale(2, BigDecimal.ROUND_HALF_UP), unit: kg ? "kg" : "lb")
+    }
+    if (last[DP_VISIT_SEC] != null) sendEvent(name: "lastVisitDuration", value: last[DP_VISIT_SEC] as Integer, unit: "s")
+    if (last[DP_VISITS] != null)    sendEvent(name: "visitsToday", value: last[DP_VISITS] as Integer)
+    if (last[DP_FAULT] != null) {
+        int bits = last[DP_FAULT] as Integer
+        List names = []
+        if (bits & 1) names << "motor"
+        if (bits & 2) names << "program"
+        if (bits & 4) names << "g-sensor"
+        String f = names ? names.join(", ") : "none"
+        if (f != "none" && device.currentValue("fault") != f) log.warn "${device.displayName}: fault reported: ${f}"
+        sendEvent(name: "fault", value: f)
     }
 }
 

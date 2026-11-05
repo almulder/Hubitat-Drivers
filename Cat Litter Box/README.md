@@ -28,6 +28,8 @@ Licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformprojec
 
 **Cat detection:** the device is a **Motion Sensor**. `motion` is `active` while the cat is at or in the box and `inactive` once it leaves, so you can use cat visits in Rule Machine, webCoRE or dashboards (for example, count visits or get notified).
 
+**Visit data:** after each visit the box reports `catWeight` (in lb or kg, set by the **Weight unit** preference), `lastVisitDuration` (seconds) and, on boxes that send it, `visitsToday`. `fault` shows `none`, or which part reported a problem (motor, program, g-sensor). A new fault is also logged as a warning.
+
 Each setting is also an attribute (`cleaning`, `emptying`, `autoMode`, `deodorizing`, `infraredSensor`, `childLock`, `clumpingTime`, `cleaningInterval`, `binCalibration`, `litterLeveling`) that updates as soon as the box reports a change, including changes made in the app or on the box itself. `session` shows the connection state (`ready`, `negotiating`, `offline`).
 
 ---
@@ -74,6 +76,7 @@ If your Smart Life devices are spread over more than one account, link each acco
 | **Device IP address** | The box's IP on your network. Give it a DHCP reservation so it doesn't change. |
 | **Device ID** | From the Tuya cloud project (see above). |
 | **Local Key** | From the Tuya cloud project (see above). |
+| **Weight unit** | Show `catWeight` in lb (default) or kg. |
 | **Poll interval** | How often the driver reads the full state, in seconds. Changes are pushed by the box as they happen, so this is just a backstop. |
 | **Description logging** | Logs each change the box reports. |
 | **Debug logging** | Off by default; turns itself off 30 minutes after you enable it. |
@@ -96,6 +99,10 @@ Once the driver works, you can block the box's internet access in your router or
 ---
 
 ## Changes
+
+**0.1.2 (2026-11-04)**
+
+- New attributes: `catWeight` (lb or kg), `lastVisitDuration`, `visitsToday` and `fault`, plus a **Weight unit** preference.
 
 **0.1.1 (2026-11-04)**
 
