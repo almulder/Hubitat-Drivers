@@ -50,6 +50,16 @@
         "Lights & Switches",
         "LAN"
       ]
+    },
+    {
+      "name": "Cat Litter Box (Tuya Local)",
+      "category": "Integrations",
+      "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/hpm/cat-litter-box.json",
+      "description": "Local, no-cloud control of the Tuya Smart Cat Litter Box 04 ZY (Smart Life app) over Tuya protocol 3.5: clean, empty, auto mode, deodorize, child lock and settings, with live status.",
+      "tags": [
+        "Misc. Devices",
+        "LAN"
+      ]
     }
   ]
 }
