@@ -26,6 +26,8 @@ Licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformprojec
 | **setLitterLeveling** | Litter leveling setting, 0–6. |
 | **refresh** | Reads the full state from the box. |
 
+**Cat detection:** the device is a **Motion Sensor**. `motion` is `active` while the cat is at or in the box and `inactive` once it leaves, so you can use cat visits in Rule Machine, webCoRE or dashboards (for example, count visits or get notified).
+
 Each setting is also an attribute (`cleaning`, `emptying`, `autoMode`, `deodorizing`, `infraredSensor`, `childLock`, `clumpingTime`, `cleaningInterval`, `binCalibration`, `litterLeveling`) that updates as soon as the box reports a change, including changes made in the app or on the box itself. `session` shows the connection state (`ready`, `negotiating`, `offline`).
 
 ---
@@ -94,6 +96,10 @@ Once the driver works, you can block the box's internet access in your router or
 ---
 
 ## Changes
+
+**0.1.1 (2026-11-04)**
+
+- Cat detection: the device is now a Motion Sensor (`motion` active while the cat is at or in the box).
 
 **0.1.0 (2026-11-04)**
 

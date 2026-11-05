@@ -6,7 +6,7 @@
  *  no cloud. It speaks Tuya protocol 3.5, so the box can be blocked from the internet
  *  and still be controlled from Hubitat: clean, empty, auto mode, deodorize, infrared
  *  sensor, child lock, clumping time, cleaning interval, bin calibration and litter
- *  leveling.
+ *  leveling. It also reports cat visits as a Motion Sensor.
  *
  *  Setup: each box needs its IP address, Device ID and Local Key. The preferences
  *  page explains how to get them. In short:
@@ -36,6 +36,7 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.1 - 2026-11-04 - Cat detection: Motion Sensor (active while the cat is at or in the box).
  *  0.1.0 - 2026-11-04 - Initial build: local Tuya 3.5 control of the litter box.
  */
 
@@ -48,7 +49,7 @@ import java.security.SecureRandom
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 
-@Field static final String DRIVER_VERSION = "0.1.0"
+@Field static final String DRIVER_VERSION = "0.1.1"
 
 // Setup help shown on the preferences page
 @Field static final String HELP_IP = "The box's IP address on your network. Find it in your router's client list, and give it a fixed/reserved IP so it never changes."
@@ -64,6 +65,7 @@ Copy the key exactly; it is 16 characters and often contains symbols. Re-pairing
 // Litter box data points (mapped from the SmartLife app, model "Smart Cat Litter Box 04 ZY")
 @Field static final String DP_CLEAN      = "101"   // on starts a clean; switches Auto off
 @Field static final String DP_EMPTY      = "102"   // dump all litter
+@Field static final String DP_CAT        = "104"   // cat detected (approached/inside); read-only
 @Field static final String DP_AUTO       = "105"   // Auto mode on/off
 @Field static final String DP_INFRARED   = "111"   // infrared (cat detection) sensor on/off
 @Field static final String DP_CHILD_LOCK = "114"   // child lock on/off
@@ -93,6 +95,7 @@ metadata {
         capability "Actuator"
         capability "Sensor"
         capability "Initialize"
+        capability "MotionSensor"      // motion: active while the cat is detected
 
         attribute "session", "string"      // negotiating / ready / offline
         attribute "cleaning", "enum", ["on", "off"]
@@ -426,6 +429,10 @@ private updateAttributesFromDps(Map dps) {
     [(DP_CLEAN): "cleaning", (DP_EMPTY): "emptying", (DP_AUTO): "autoMode",
      (DP_INFRARED): "infraredSensor", (DP_CHILD_LOCK): "childLock", (DP_DEODORIZE): "deodorizing"].each { dp, attr ->
         if (last[dp] != null) sendEvent(name: attr, value: last[dp] ? "on" : "off")
+    }
+    if (last[DP_CAT] != null) {
+        String m = last[DP_CAT] ? "active" : "inactive"
+        sendEvent(name: "motion", value: m, descriptionText: "${device.displayName}: cat ${m == 'active' ? 'detected' : 'left'}")
     }
     [(DP_CLUMP_MIN): "clumpingTime", (DP_INTERVAL): "cleaningInterval",
      (DP_BIN_CAL): "binCalibration", (DP_LEVELING): "litterLeveling"].each { dp, attr ->

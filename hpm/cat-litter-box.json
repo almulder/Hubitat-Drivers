@@ -4,7 +4,7 @@
   "minimumHEVersion": "2.2.9",
   "dateReleased": "2026-11-04",
   "documentationLink": "https://github.com/almulder/Hubitat-Drivers/tree/main/Cat%20Litter%20Box",
-  "releaseNotes": "0.1.0 - Initial release. Local control of the Tuya Smart Cat Litter Box 04 ZY (Smart Life / Tuya Smart app) over Tuya protocol 3.5, no cloud needed: clean, empty, auto mode, deodorize, infrared sensor, child lock, clumping time, cleaning interval, bin calibration and litter leveling, with live status. Needs each box's IP, Device ID and Local Key; the README and the preferences page explain how to get them from a free Tuya developer account.",
+  "releaseNotes": "0.1.1 - Cat detection: the device is now a Motion Sensor (motion active while the cat is at or in the box, inactive when it leaves), so cat visits can trigger rules and dashboards.\n0.1.0 - Initial release. Local control of the Tuya Smart Cat Litter Box 04 ZY (Smart Life / Tuya Smart app) over Tuya protocol 3.5, no cloud needed: clean, empty, auto mode, deodorize, infrared sensor, child lock, clumping time, cleaning interval, bin calibration and litter leveling, with live status. Needs each box's IP, Device ID and Local Key; the README and the preferences page explain how to get them from a free Tuya developer account.",
   "tags": [
     "Misc. Devices",
     "LAN"
@@ -16,7 +16,7 @@
       "namespace": "almulder",
       "location": "https://raw.githubusercontent.com/almulder/Hubitat-Drivers/main/Cat%20Litter%20Box/Drivers/Cat%20Litter%20Box%20(Tuya%20Local).groovy",
       "required": true,
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
