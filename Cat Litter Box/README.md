@@ -18,8 +18,10 @@ Licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformprojec
 | **empty** / **cancelEmpty** | Dump all the litter, or cancel. |
 | **autoMode** on/off | Clean automatically after the cat leaves. |
 | **deodorize** on/off | Deodorizer. |
-| **infraredSensor** on/off | Cat-detection sensor. Leave it on so the box doesn't move with a cat inside. |
+| **infraredSensor** on/off | Cat-detection radar. Leave it on so the box doesn't move with a cat inside. (On these boxes the underlying setting is inverted, "radar off"; the driver handles that, so **on** means the radar is on.) |
 | **childLock** on/off | Locks the buttons on the box. |
+| **smartClean** on/off | Smart clean. The box also turns this on while an automatic clean is running and off when it finishes. |
+| **autoDeodorize** on/off | Deodorize automatically after each clean (about 30 minutes). |
 | **setClumpingTime** | Wait after the cat leaves before cleaning, 0–60 minutes. |
 | **setCleaningInterval** | Cleaning interval, 0–120 minutes. |
 | **setBinCalibration** | Waste bin calibration, 0–15. |
@@ -30,7 +32,13 @@ Licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformprojec
 
 **Visit data:** after each visit the box reports `catWeight` (in lb or kg, set by the **Weight unit** preference), `lastVisitDuration` (seconds) and, on boxes that send it, `visitsToday`. `fault` shows `none`, or which part reported a problem (motor, program, g-sensor). A new fault is also logged as a warning.
 
-Each setting is also an attribute (`cleaning`, `emptying`, `autoMode`, `deodorizing`, `infraredSensor`, `childLock`, `clumpingTime`, `cleaningInterval`, `binCalibration`, `litterLeveling`) that updates as soon as the box reports a change, including changes made in the app or on the box itself. `session` shows the connection state (`ready`, `negotiating`, `offline`).
+**Waste bin:** `wasteBin` is `full` while the box's Full light is on and `ok` otherwise.
+
+**Change log for every data point:** each change the box reports becomes a `dpChange` event (for example `DP 101 clean: false → true`), labeled as confirmed, `[unconfirmed]` or `UNKNOWN`, including data points that appear for the first time. Hubitat keeps only a limited number of events per attribute (11 by default), so raise the device's max events if you want a longer history.
+
+**Typical automatic cycle:** cleaning starts after the cleaning wait time once the cat leaves, takes about 5 minutes (Auto mode reads off while it runs), then deodorizes for about 30 minutes. If `cleaning` stays on much longer than that, the box has usually paused, for example because the lid is open or jammed, and needs attention. That makes a good rule or piston trigger.
+
+Each setting is also an attribute (`cleaning`, `emptying`, `autoMode`, `deodorizing`, `infraredSensor`, `childLock`, `smartClean`, `autoDeodorize`, `clumpingTime`, `cleaningInterval`, `binCalibration`, `litterLeveling`) that updates as soon as the box reports a change, including changes made in the app or on the box itself. `session` shows the connection state (`ready`, `negotiating`, `offline`).
 
 ---
 
@@ -99,6 +107,14 @@ Once the driver works, you can block the box's internet access in your router or
 ---
 
 ## Changes
+
+**0.1.3 (2026-11-06)**
+
+- Fixed false "no traffic" reconnects, a false "Local Key is wrong" warning and dropped connections. They were caused by Hubitat threads overwriting each other's state; the driver now uses `atomicState`.
+- Fixed **infraredSensor** being inverted: **on** now turns the radar on.
+- New: `wasteBin` (full/ok), **smartClean** and **autoDeodorize** controls.
+- New: every data point change is a labeled `dpChange` event, including first appearances.
+- Keeps the connection alive with a 10-second heartbeat and reconnects automatically. A failed handshake is retried before the key is blamed, an outage logs one warning and one "reconnected" message instead of one per retry, and only one status query is queued while the box is unreachable.
 
 **0.1.2 (2026-11-04)**
 

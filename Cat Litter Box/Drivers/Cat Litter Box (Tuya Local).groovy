@@ -5,9 +5,10 @@
  *  usually set up in the Smart Life / Tuya Smart app) directly over your LAN, with
  *  no cloud. It speaks Tuya protocol 3.5, so the box can be blocked from the internet
  *  and still be controlled from Hubitat: clean, empty, auto mode, deodorize, infrared
- *  sensor, child lock, clumping time, cleaning interval, bin calibration and litter
- *  leveling. It also reports cat visits as a Motion Sensor, plus the cat's weight
- *  and how long each visit lasted.
+ *  sensor, child lock, smart clean, auto deodorize, clumping time, cleaning interval,
+ *  bin calibration and litter leveling. It also reports cat visits as a Motion
+ *  Sensor, the cat's weight, how long each visit lasted, and whether the waste bin
+ *  is full.
  *
  *  Setup: each box needs its IP address, Device ID and Local Key. The preferences
  *  page explains how to get them. In short:
@@ -37,6 +38,15 @@
  *             part of this code is not permitted.
  *
  *  Changelog (newest first)
+ *  0.1.3 - 2026-11-06 - Fix false "no traffic" reconnects, a false "Local Key is wrong" warning and dropped
+ *                       connections (state clobbered by concurrent threads; now atomicState). Retries a
+ *                       failed handshake before blaming the key. Heartbeat replies no longer logged.
+ *                       New: wasteBin (full / ok, DP 103), smartClean and autoDeodorize controls.
+ *                       Fix: infraredSensor was inverted (DP 111 true means the radar is OFF).
+ *                       Only one status query is queued while the box is unreachable, and an
+ *                       outage logs one warning (and one "reconnected") instead of one per retry.
+ *                       Every DP change is a dpChange event labeled confirmed / unconfirmed /
+ *                       UNKNOWN, including DPs that appear for the first time.
  *  0.1.2 - 2026-11-04 - Cat weight (lb/kg), last visit duration, visits today and fault status.
  *  0.1.1 - 2026-11-04 - Cat detection: Motion Sensor (active while the cat is at or in the box).
  *  0.1.0 - 2026-11-04 - Initial build: local Tuya 3.5 control of the litter box.
@@ -51,7 +61,23 @@ import java.security.SecureRandom
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 
-@Field static final String DRIVER_VERSION = "0.1.2"
+@Field static final String DRIVER_VERSION = "0.1.3"
+
+// Names for the dpChange event log. Confirmed = verified on the real box (app buttons
+// or app readings); the rest come from Tuya's data model and are marked unconfirmed.
+@Field static final Map DP_CONFIRMED = [
+    "6": "cat weight (g)", "8": "last visit duration (s)", "101": "clean", "102": "empty",
+    "104": "cat detected", "105": "auto mode", "111": "infrared radar OFF (inverted)",
+    "114": "child lock", "117": "cleaning wait time (min)", "118": "cleaning interval (min)",
+    "120": "deodorize", "121": "smart clean", "124": "bin calibration", "125": "litter leveling", "129": "cat weight (lb x100)"]
+@Field static final Map DP_MODEL = [
+    "7": "visits count", "17": "deodorization (std)", "22": "fault", "103": "waste bin full",
+    "106": "clean schedule", "107": "scheduled clean on/off", "108": "version id", "109": "backup version id",
+    "110": "do-not-disturb schedule", "112": "visit notification", "113": "bin/drum reset",
+    "115": "scale calibration", "116": "weight unit", "119": "bin-almost-full notification",
+    "122": "do-not-disturb on/off", "123": "usage count",
+    "126": "auto deodorize", "127": "detection sensitivity (g)", "128": "counter",
+    "130": "expel mode", "131": "weight correction (%)", "132": "zero scale", "133": "remote restart"]
 
 // Setup help shown on the preferences page
 @Field static final String HELP_IP = "The box's IP address on your network. Find it in your router's client list, and give it a fixed/reserved IP so it never changes."
@@ -72,13 +98,16 @@ Copy the key exactly; it is 16 characters and often contains symbols. Re-pairing
 @Field static final String DP_WEIGHT_LB  = "129"   // cat weight in lb x 100
 @Field static final String DP_CLEAN      = "101"   // on starts a clean; switches Auto off
 @Field static final String DP_EMPTY      = "102"   // dump all litter
+@Field static final String DP_BIN_FULL   = "103"   // waste bin full (Full light); read-only, sent while full
 @Field static final String DP_CAT        = "104"   // cat detected (approached/inside); read-only
 @Field static final String DP_AUTO       = "105"   // Auto mode on/off
-@Field static final String DP_INFRARED   = "111"   // infrared (cat detection) sensor on/off
+@Field static final String DP_INFRARED   = "111"   // app toggle "Infrared Radar Sensor Off": true = sensor OFF
 @Field static final String DP_CHILD_LOCK = "114"   // child lock on/off
 @Field static final String DP_CLUMP_MIN  = "117"   // clumping time, 0-60 min
 @Field static final String DP_INTERVAL   = "118"   // cleaning interval, 0-120 min
 @Field static final String DP_DEODORIZE  = "120"   // deodorize on/off
+@Field static final String DP_SMART_CLEAN = "121"  // smart clean on/off (confirmed in the app)
+@Field static final String DP_AUTO_DEO    = "126"  // auto deodorize on/off
 @Field static final String DP_BIN_CAL    = "124"   // waste bin calibration, 0-15
 @Field static final String DP_LEVELING   = "125"   // litter leveling setting, 0-6
 
@@ -111,6 +140,9 @@ metadata {
         attribute "infraredSensor", "enum", ["on", "off"]
         attribute "childLock", "enum", ["on", "off"]
         attribute "deodorizing", "enum", ["on", "off"]
+        attribute "smartClean", "enum", ["on", "off"]
+        attribute "autoDeodorize", "enum", ["on", "off"]
+        attribute "wasteBin", "enum", ["ok", "full"]
         attribute "catWeight", "number"         // lb or kg, per the Weight unit preference
         attribute "lastVisitDuration", "number" // seconds
         attribute "visitsToday", "number"
@@ -119,6 +151,7 @@ metadata {
         attribute "cleaningInterval", "number"  // minutes
         attribute "binCalibration", "number"
         attribute "litterLeveling", "number"
+        attribute "dpChange", "string"     // last DP change, labeled; every change is an event
         attribute "dps", "string"          // full raw DPS JSON (for unmapped points)
         attribute "lastUpdate", "string"
 
@@ -130,6 +163,8 @@ metadata {
         command "deodorize",      [[name:"Deodorize*", type:"ENUM", constraints:["on","off"]]]
         command "infraredSensor", [[name:"Infrared sensor*", type:"ENUM", constraints:["on","off"]]]
         command "childLock",      [[name:"Child lock*", type:"ENUM", constraints:["on","off"]]]
+        command "smartClean",     [[name:"Smart clean*", type:"ENUM", constraints:["on","off"]]]
+        command "autoDeodorize",  [[name:"Auto deodorize*", type:"ENUM", constraints:["on","off"]]]
         command "setClumpingTime",     [[name:"Minutes (0-60)*", type:"NUMBER"]]
         command "setCleaningInterval", [[name:"Minutes (0-120)*", type:"NUMBER"]]
         command "setBinCalibration",   [[name:"Level (0-15)*", type:"NUMBER"]]
@@ -169,10 +204,10 @@ def logsOff() {
 
 def initialize() {
     logd "initialize()"
-    state.seq = 1
-    state.phase = "offline"
-    state.rx = ""
-    state.pending = []
+    atomicState.seq = 1
+    atomicState.phase = "offline"
+    atomicState.rx = ""
+    atomicState.pending = []
     sendEvent(name: "session", value: "offline")
     reconnect()
     Integer p = (settings.pollSec ?: 60) as Integer
@@ -183,14 +218,20 @@ def reconnect() {
     try {
         interfaces.rawSocket.close()
     } catch (ignored) {}
-    state.phase = "offline"
-    state.rx = ""
+    atomicState.phase = "offline"
+    atomicState.rx = ""
     try {
         logd "connecting to ${settings.ip}:6668"
         interfaces.rawSocket.connect(settings.ip, 6668, byteInterface: true)
         startNegotiation()
     } catch (e) {
-        log.warn "${device.displayName}: connect failed: ${e}"
+        // Warn once per outage (e.g. the box is unplugged); keep retrying quietly.
+        if (!atomicState.unreachable) {
+            log.warn "${device.displayName}: can't reach ${settings.ip} (${e.message}); retrying every 30s"
+            atomicState.unreachable = true
+        } else {
+            logd "connect failed: ${e}"
+        }
         sendEvent(name: "session", value: "offline")
         runIn(30, "reconnect")
     }
@@ -199,7 +240,7 @@ def reconnect() {
 def socketStatus(String msg) {
     logd "socketStatus: ${msg}"
     if (msg?.toLowerCase()?.contains("error") || msg?.toLowerCase()?.contains("close")) {
-        state.phase = "offline"
+        atomicState.phase = "offline"
         sendEvent(name: "session", value: "offline")
         runIn(15, "reconnect")
     }
@@ -229,11 +270,20 @@ def empty()       { queueOrSend([type: "set", dps: [(DP_EMPTY): true]]) }
 def cancelEmpty() { queueOrSend([type: "set", dps: [(DP_EMPTY): false]]) }
 
 def infraredSensor(String onOff) {
-    queueOrSend([type: "set", dps: [(DP_INFRARED): (onOff == "on")]])
+    // DP 111 is inverted: true turns the radar off
+    queueOrSend([type: "set", dps: [(DP_INFRARED): (onOff != "on")]])
 }
 
 def childLock(String onOff) {
     queueOrSend([type: "set", dps: [(DP_CHILD_LOCK): (onOff == "on")]])
+}
+
+def smartClean(String onOff) {
+    queueOrSend([type: "set", dps: [(DP_SMART_CLEAN): (onOff == "on")]])
+}
+
+def autoDeodorize(String onOff) {
+    queueOrSend([type: "set", dps: [(DP_AUTO_DEO): (onOff == "on")]])
 }
 
 def setClumpingTime(minutes)     { setNumber(DP_CLUMP_MIN, minutes, 0, 60, "clumping time") }
@@ -251,15 +301,20 @@ private setNumber(String dp, value, int min, int max, String label) {
 }
 
 private queueOrSend(Map action) {
-    if (state.phase == "ready" && isStale()) {
+    if (atomicState.phase == "ready" && isStale()) {
         logd "session stale, reconnecting"
-        state.phase = "offline"
+        atomicState.phase = "offline"
     }
-    if (state.phase == "ready") {
+    if (atomicState.phase == "ready") {
         doAction(action)
     } else {
-        state.pending = (state.pending ?: []) + [action]
-        if (state.phase == "offline") reconnect()
+        List pend = atomicState.pending ?: []
+        // While the box is unreachable each poll would queue another status query;
+        // one is enough, so don't stack them up.
+        if (!(action.type == "query" && pend.any { it.type == "query" })) {
+            atomicState.pending = pend + [action]
+        }
+        if (atomicState.phase == "offline") reconnect()
     }
 }
 
@@ -275,12 +330,12 @@ private doAction(Map action) {
 // ---------- session handshake ----------
 
 private startNegotiation() {
-    state.phase = "negotiating"
+    atomicState.phase = "negotiating"
     sendEvent(name: "session", value: "negotiating")
     byte[] ln = new byte[16]
     new SecureRandom().nextBytes(ln)
-    state.localNonce = HexUtils.byteArrayToHexString(ln)
-    state.seq = 1
+    atomicState.localNonce = HexUtils.byteArrayToHexString(ln)
+    atomicState.seq = 1
     byte[] frame = packFrame(nextSeq(), SESS_START, ln, keyBytes())
     logd "-> SESS_START"
     sendHex(frame)
@@ -291,7 +346,7 @@ private startNegotiation() {
 // open so unsolicited DP reports keep arriving. If nothing has come back in 25s
 // the socket is presumed dead and we reconnect.
 def heartbeat() {
-    if (state.phase != "ready") return
+    if (atomicState.phase != "ready") return
     if (isStale()) {
         log.warn "${device.displayName}: no traffic from ${settings.ip} in 25s, reconnecting"
         reconnect()
@@ -304,13 +359,13 @@ def heartbeat() {
 }
 
 private boolean isStale() {
-    return (now() - ((state.lastRx ?: 0) as Long)) > 25000
+    return (now() - ((atomicState.lastRx ?: 0) as Long)) > 25000
 }
 
 def negotiationTimeout() {
-    if (state.phase == "negotiating") {
+    if (atomicState.phase == "negotiating") {
         log.warn "${device.displayName}: no handshake reply from ${settings.ip} after 8s — retrying in 30s (if it keeps failing, check the IP and Local Key)"
-        state.phase = "offline"
+        atomicState.phase = "offline"
         sendEvent(name: "session", value: "offline")
         runIn(30, "reconnect")
     }
@@ -335,21 +390,20 @@ def selfTest() {
 // ---------- inbound ----------
 
 def parse(String hexMsg) {
-    logd "RX ${hexMsg}"
-    state.rx = ((state.rx ?: "") + hexMsg).toUpperCase()
+    atomicState.rx = ((atomicState.rx ?: "") + hexMsg).toUpperCase()
     // extract complete frames from the hex buffer
     while (true) {
-        String buf = state.rx
+        String buf = atomicState.rx
         int idx = buf.indexOf(PREFIX)
-        if (idx < 0) { if (buf.length() > 4096) state.rx = ""; break }
+        if (idx < 0) { if (buf.length() > 4096) atomicState.rx = ""; break }
         if (idx > 0) buf = buf.substring(idx)             // drop junk before prefix
-        if (buf.length() < 36) { state.rx = buf; break }  // need 18-byte header
+        if (buf.length() < 36) { atomicState.rx = buf; break }  // need 18-byte header
         byte[] hdr = HexUtils.hexStringToByteArray(buf.substring(0, 36))
         long length = readU32(hdr, 14)
         int totalBytes = 18 + (int) length + 4
-        if (buf.length() < totalBytes * 2) { state.rx = buf; break }
+        if (buf.length() < totalBytes * 2) { atomicState.rx = buf; break }
         String frameHex = buf.substring(0, totalBytes * 2)
-        state.rx = buf.substring(totalBytes * 2)
+        atomicState.rx = buf.substring(totalBytes * 2)
         handleFrame(HexUtils.hexStringToByteArray(frameHex))
     }
 }
@@ -358,15 +412,15 @@ private handleFrame(byte[] data) {
     int cmd = (int) readU32(data, 10)
     byte[] pt
     try {
-        pt = unpackFrame(data, (state.phase == "ready") ? sessionKeyBytes() : keyBytes())
+        pt = unpackFrame(data, (atomicState.phase == "ready") ? sessionKeyBytes() : keyBytes())
     } catch (e) {
         // during negotiation the device encrypts with real key; after, session key
         try { pt = unpackFrame(data, keyBytes()) } catch (e2) {
             log.warn "${device.displayName}: decrypt failed cmd=${cmd}: ${e2}"; return
         }
     }
-    state.lastRx = now()
-    if (cmd == HEART_BEAT) return
+    atomicState.lastRx = now()
+    if (cmd == HEART_BEAT) return   // every 10s; not logged
     logd "<- cmd=${cmd} len=${pt?.length}"
 
     if (cmd == SESS_RESP) {
@@ -392,16 +446,26 @@ private handleFrame(byte[] data) {
 }
 
 private onSessResp(byte[] pt) {
-    byte[] ln = HexUtils.hexStringToByteArray(state.localNonce)
+    byte[] ln = HexUtils.hexStringToByteArray(atomicState.localNonce)
     byte[] rn = subBytes(pt, 0, 16)
     byte[] gotHmac = subBytes(pt, 16, 48)
     byte[] wantHmac = hmacSha256(keyBytes(), ln)
     if (!bytesEqual(gotHmac, wantHmac)) {
-        log.warn "${device.displayName}: handshake rejected, the Local Key is wrong"
-        state.phase = "offline"; sendEvent(name:"session", value:"offline")
+        // One mismatch can be a stray reply; only blame the key if it keeps happening.
+        int fails = ((atomicState.handshakeFails ?: 0) as Integer) + 1
+        atomicState.handshakeFails = fails
+        atomicState.phase = "offline"; sendEvent(name:"session", value:"offline")
+        if (fails >= 3) {
+            log.warn "${device.displayName}: handshake rejected ${fails} times in a row, the Local Key is probably wrong"
+            runIn(60, "reconnect")
+        } else {
+            logd "handshake reply didn't verify (attempt ${fails}), retrying"
+            runIn(5, "reconnect")
+        }
         return
     }
-    state.remoteNonce = HexUtils.byteArrayToHexString(rn)
+    atomicState.handshakeFails = 0
+    atomicState.remoteNonce = HexUtils.byteArrayToHexString(rn)
     // finish
     byte[] finHmac = hmacSha256(keyBytes(), rn)
     sendHex(packFrame(nextSeq(), SESS_FINISH, finHmac, keyBytes()))
@@ -411,14 +475,18 @@ private onSessResp(byte[] pt) {
     byte[] iv = subBytes(ln, 0, 12)
     byte[] out = gcmEncrypt(keyBytes(), iv, xored, null)   // returns ct||tag
     byte[] sk = subBytes(out, 0, 16)
-    state.sessionKey = HexUtils.byteArrayToHexString(sk)
-    state.phase = "ready"
+    atomicState.sessionKey = HexUtils.byteArrayToHexString(sk)
+    atomicState.phase = "ready"
     sendEvent(name: "session", value: "ready")
     logd "session ready"
+    if (atomicState.unreachable) {
+        log.info "${device.displayName}: reconnected to ${settings.ip}"
+        atomicState.unreachable = false
+    }
     runIn(10, "heartbeat")
     // flush queued actions (default to a status query)
-    def pend = (state.pending ?: [])
-    state.pending = []
+    def pend = (atomicState.pending ?: [])
+    atomicState.pending = []
     if (pend.isEmpty()) pend = [[type: "query"]]
     pend.each { doAction(it) }
 }
@@ -426,23 +494,37 @@ private onSessResp(byte[] pt) {
 // ---------- DP → attribute mapping (fill in as DPs are identified) ----------
 
 private updateAttributesFromDps(Map dps) {
-    // Log every DP that changed so controls can be mapped by pressing buttons
-    // in the SmartLife app and watching the hub log.
-    Map last = state.lastDps ?: [:]
+    // Every DP change (and any DP seen for the first time after the initial
+    // snapshot) becomes a dpChange event in the device's Events tab, labeled
+    // confirmed / unconfirmed / UNKNOWN, so new behavior can be spotted later.
+    Map last = atomicState.lastDps ?: [:]
+    boolean haveSnapshot = !last.isEmpty()
     dps.each { k, v ->
         String key = k.toString()
-        if (last.containsKey(key) && last[key] != v && txtEnable != false) {
-            log.info "${device.displayName}: DP ${key} ${last[key]} → ${v}"
+        boolean isNew = !last.containsKey(key)
+        if ((isNew && haveSnapshot) || (!isNew && last[key] != v)) {
+            String msg = "DP ${key} ${dpLabel(key)}: ${isNew ? '(new)' : last[key]} → ${v}"
+            sendEvent(name: "dpChange", value: msg, isStateChange: true, descriptionText: "${device.displayName}: ${msg}")
+            if (txtEnable != false) log.info "${device.displayName}: ${msg}"
         }
         last[key] = v
     }
-    state.lastDps = last
+    atomicState.lastDps = last
     sendEvent(name: "dps", value: JsonOutput.toJson(last))
     [(DP_CLEAN): "cleaning", (DP_EMPTY): "emptying", (DP_AUTO): "autoMode",
-     (DP_INFRARED): "infraredSensor", (DP_CHILD_LOCK): "childLock", (DP_DEODORIZE): "deodorizing"].each { dp, attr ->
+     (DP_CHILD_LOCK): "childLock", (DP_DEODORIZE): "deodorizing",
+     (DP_SMART_CLEAN): "smartClean", (DP_AUTO_DEO): "autoDeodorize"].each { dp, attr ->
         if (last[dp] != null) sendEvent(name: attr, value: last[dp] ? "on" : "off")
     }
     updateVisitAttributes(last)
+    if (last[DP_INFRARED] != null) sendEvent(name: "infraredSensor", value: last[DP_INFRARED] ? "off" : "on")   // inverted DP
+    if (last[DP_BIN_FULL] != null) {
+        String b = last[DP_BIN_FULL] ? "full" : "ok"
+        if (b == "full" && device.currentValue("wasteBin") != "full" && txtEnable != false) {
+            log.info "${device.displayName}: waste bin is full"
+        }
+        sendEvent(name: "wasteBin", value: b, descriptionText: "${device.displayName}: waste bin ${b}")
+    }
     if (last[DP_CAT] != null) {
         String m = last[DP_CAT] ? "active" : "inactive"
         sendEvent(name: "motion", value: m, descriptionText: "${device.displayName}: cat ${m == 'active' ? 'detected' : 'left'}")
@@ -451,6 +533,12 @@ private updateAttributesFromDps(Map dps) {
      (DP_BIN_CAL): "binCalibration", (DP_LEVELING): "litterLeveling"].each { dp, attr ->
         if (last[dp] != null) sendEvent(name: attr, value: last[dp] as Integer)
     }
+}
+
+private String dpLabel(String dp) {
+    if (DP_CONFIRMED[dp]) return DP_CONFIRMED[dp]
+    if (DP_MODEL[dp])     return "${DP_MODEL[dp]} [unconfirmed]"
+    return "UNKNOWN"
 }
 
 // Weight, last visit, visits today and fault. The box reports the weight twice:
@@ -644,13 +732,13 @@ private boolean bytesEqual(byte[] a, byte[] b) {
 }
 
 private byte[] keyBytes()        { return (settings.localKey ?: "").getBytes("ISO-8859-1") }
-private byte[] sessionKeyBytes() { return HexUtils.hexStringToByteArray(state.sessionKey) }
+private byte[] sessionKeyBytes() { return HexUtils.hexStringToByteArray(atomicState.sessionKey) }
 private byte[] versionHeader() {
     byte[] vh = new byte[15]
     vh[0] = (byte)'3'; vh[1] = (byte)'.'; vh[2] = (byte)'5'
     return vh
 }
-private int nextSeq() { int s = (state.seq ?: 1) as Integer; state.seq = s + 1; return s }
+private int nextSeq() { int s = (atomicState.seq ?: 1) as Integer; atomicState.seq = s + 1; return s }
 
 private void writeU16(ByteArrayOutputStream o, int v) { o.write((v>>8)&0xff); o.write(v&0xff) }
 private void writeU32(ByteArrayOutputStream o, long v) {
