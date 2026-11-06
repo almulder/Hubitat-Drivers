@@ -2,6 +2,8 @@
  *  YoLink™ Power Failure Alarm (Local API Edition)
  *  © 2025 Albert Mulder
  *
+ *  1.2.1 - Works with YoLink app versions older than 1.3.0 again: if the app is older, the driver no longer
+ *          calls getDeviceTokenFor() (which those apps lack), so polls keep working until the app is updated.
  *  1.2.0 - Audit fixes: a message without power info no longer reports mains/switch off during an outage;
  *          reset no longer forces "mains"; battery uses the shared mapping; added reset command and MQTT
  *          lastResponse; battery 0 now reports 0% and a message without a battery reading leaves battery
@@ -14,7 +16,7 @@
  */
 import groovy.json.JsonSlurper
 
-def clientVersion() { "1.2.0" }
+def clientVersion() { "1.2.1" }
 def copyright()     { "© 2025 Albert Mulder" }
 def driverName()    { "YoLink™ Power Failure Alarm (Local API Edition)" }
 
@@ -61,6 +63,10 @@ metadata {
 }
 
 /* ============================== Setup ================================ */
+// True while the parent app is older than 1.3.0. Drivers before 1.2.0 kept the client secret in state,
+// so its presence marks a device the new app hasn't set up yet.
+private boolean legacyApp() { state.legacyApp || state.clientSecret }
+
 void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId,
                   localHubIP=null, clientId=null, clientSecret=null) {
     state.my_dni       = Hubitat_dni
@@ -70,6 +76,8 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId,
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP
+    // Apps before 1.3.0 pass the broker credentials here and have no getDeviceTokenFor()
+    if (clientSecret) state.legacyApp = true else state.remove("legacyApp")
     state.remove("clientId")       // broker credentials are only needed by the MQTT Listener
     state.remove("clientSecret")
     rememberState("devId", devId)
@@ -141,8 +149,10 @@ def getDevicestate() {
             token       : state.token
         ]
         def object = parent.pollAPI(request, state.name, state.type)
-        String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
-        if (latestToken && latestToken != state.token) state.token = latestToken
+        if (!legacyApp()) {
+            String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
+            if (latestToken && latestToken != state.token) state.token = latestToken
+        }
         if (object) {
             if (successful(object)) {
                 parseDevice(object)

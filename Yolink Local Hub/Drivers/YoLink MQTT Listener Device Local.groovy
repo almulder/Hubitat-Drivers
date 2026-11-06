@@ -2,6 +2,9 @@
  *  YoLink™ MQTT Listener (Local API Edition)
  *  © 2025 Albert Mulder
  *
+ *  1.2.1 - Works with YoLink app versions older than 1.3.0 again: if the app passes the broker credentials
+ *          (older apps do, and have no getMqttCredentials()), the listener keeps and uses them, so MQTT
+ *          connects. They are removed as soon as app 1.3.0+ sets the listener up.
  *  1.2.0 - Audit fixes: reset keeps subnet/hub IP so MQTT keeps working; watchdog re-subscribes and
  *          reconnects a silent connection; reconnects back off (30s up to 10 min) and no longer drop a
  *          healthy connection; stopped re-injecting cached fields into partial messages (replayed old
@@ -17,7 +20,7 @@ import groovy.json.JsonSlurper
 import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 
-def clientVersion() { "1.2.0" }
+def clientVersion() { "1.2.1" }
 def copyright()     { "© 2025 Albert Mulder" }
 def driverName()    { "YoLink™ MQTT Listener (Local API Edition)" }
 
@@ -80,8 +83,8 @@ void setDeviceToken(token) {
     }
 }
 
-// clientId/clientSecret parameters are kept for compatibility but no longer stored:
-// the broker credentials are read from the parent app at connect time.
+// App 1.3.0+ passes no clientId/clientSecret; the listener reads them from the app at connect time.
+// Older apps have no getMqttCredentials(), so whatever they pass here is kept and used instead.
 void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, localHubIP=null, clientId=null, clientSecret=null) {
     state.my_dni       = Hubitat_dni
     state.subnetId     = subnetId
@@ -90,8 +93,13 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, loca
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP   ?: creds()?.localHubIP
-    state.remove("clientSecret")
-    state.remove("clientId")
+    if (clientSecret) {
+        state.clientId     = clientId
+        state.clientSecret = clientSecret
+    } else {
+        state.remove("clientSecret")
+        state.remove("clientId")
+    }
     rememberState("devId", devId)
 
     logDebug("ServiceSetup(): subnetId=${state.subnetId}, localHubIP=${state.localHubIP}")
@@ -153,8 +161,8 @@ private void cleanupLegacyState() {
         List stale = state.keySet().findAll { it?.toString()?.startsWith("lastData_") } as List
         stale.each { state.remove(it) }
     } catch (ignored) {}
-    state.remove("clientSecret")
-    state.remove("clientId")
+    // clientId/clientSecret are left alone: an app older than 1.3.0 still needs them, and ServiceSetup
+    // drops them once app 1.3.0+ sets the listener up.
     state.remove("lastMsgTs")
 }
 
@@ -181,6 +189,9 @@ def logDebug(msg) {
 }
 
 private Map creds() {
+    // Credentials in state mean the app is older than 1.3.0, which has no getMqttCredentials()
+    if (state.clientSecret) return [clientId: state.clientId, clientSecret: state.clientSecret,
+                                    subnetId: state.subnetId, localHubIP: state.localHubIP]
     try { return parent?.getMqttCredentials() } catch (ignored) { return null }
 }
 

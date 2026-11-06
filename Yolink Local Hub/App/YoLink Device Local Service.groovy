@@ -12,6 +12,8 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expressed or implied. 
  * 
+ * 1.3.1 - Works with an MQTT Listener driver older than 1.2.0: that Listener is given the broker credentials
+ *         again during setup, so MQTT keeps connecting if the app is updated before the drivers.
  * 1.3.0 - The app now appears under Integrations in the Hubitat sidebar instead of Apps (platform 2.5.0+;
  *         older firmware keeps it under Apps).
  *         Audit fixes: device-token refresh now updates the driver (was throwing on sensors) and no longer loops;
@@ -33,7 +35,7 @@ import groovy.json.JsonOutput
 import java.net.URLEncoder
 import groovy.transform.Field
 
-private def get_APP_VERSION() {return "1.3.0"}
+private def get_APP_VERSION() {return "1.3.1"}
 private def copyright() {return "<br>© 2025-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved."}
 private def get_APP_NAME() {return "YoLink Device Local Service"}
 
@@ -512,6 +514,18 @@ String refreshDeviceTokenFor(String devId) {
     return state?.deviceToken?."${devId}"?.toString()
 }
 
+// Listener drivers before 1.2.0 never call getMqttCredentials(), so they still need the credentials
+// passed to ServiceSetup. Every Listener version has clientVersion().
+private boolean listenerNeedsCreds(dev) {
+    try {
+        List<Integer> v = (dev.clientVersion()?.toString() ?: "0").tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 }
+        while (v.size() < 2) v << 0
+        return v[0] < 1 || (v[0] == 1 && v[1] < 2)
+    } catch (Exception e) {
+        return true
+    }
+}
+
 // === Child Accessor: MQTT Listener pulls broker credentials here instead of keeping the secret in device state ===
 Map getMqttCredentials() {
     return [clientId: settings?.Client_ID?.trim(), clientSecret: settings?.Client_Secret?.trim(),
@@ -604,8 +618,9 @@ drivername = getYoLinkDriverName(drivername)
         }
     }
 
-    // Initialize/update child. Only the MQTT Listener needs broker credentials, and it reads
-    // them from the app (getMqttCredentials) rather than keeping them in device state.
+    // Initialize/update child. Only the MQTT Listener needs broker credentials. Listener 1.2.0+
+    // reads them from the app (getMqttCredentials); an older Listener only gets them from here.
+    boolean passCreds = (devtype == "MQTT Listener") && listenerNeedsCreds(dev)
     try {
         dev.ServiceSetup(
             desiredDni,
@@ -615,8 +630,8 @@ drivername = getYoLinkDriverName(drivername)
             devtoken,
             devId,
             settings.localHubIP,
-            null,
-            null
+            passCreds ? settings.Client_ID : null,
+            passCreds ? settings.Client_Secret : null
         )
         try { dev.temperatureScale(settings.temperatureScale) } catch (ignored) {}
         // Do NOT push date format; drivers pull via parent.getDateTimeFormat()

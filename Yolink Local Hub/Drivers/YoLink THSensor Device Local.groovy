@@ -2,6 +2,9 @@
  *  YoLink™ THSensor Device (Local API Edition)
  *  © 2025 Albert Mulder
  *  
+ *  1.2.1 - Works with YoLink app versions older than 1.3.0 again: if the app is older, the driver no longer
+ *          calls getDeviceTokenFor() (which those apps lack), so polls keep working until the app is updated;
+ *          the correction offset is converted in the driver instead of calling the app's convertTemperatureDelta().
  *  1.2.0 - Audit fixes: temperature correction offset converted as a difference (+1°C = +1.8°F, was 33.8°F);
  *          missing alarm block no longer writes "null" alarmCode; "mode" attribute declared; battery 0 now
  *          reports 0% and a message without a battery reading leaves battery unchanged; no forced
@@ -15,7 +18,7 @@
 
 import groovy.json.JsonSlurper
 
-def clientVersion() { return "1.2.0"}
+def clientVersion() { return "1.2.1"}
 def copyright()     { return "© 2025 Albert Mulder" }
 def bold(t)         { return "<strong>$t</strong>" }
 def driverName()    { return "YoLink™ THSensor (Local API Edition)"}
@@ -89,6 +92,10 @@ metadata {
 }
 
 /* ============================== Setup ================================ */
+// True while the parent app is older than 1.3.0. Drivers before 1.2.0 kept the client secret in state,
+// so its presence marks a device the new app hasn't set up yet.
+private boolean legacyApp() { state.legacyApp || state.clientSecret }
+
 void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, localHubIP=null, clientId=null, clientSecret=null) {
     state.my_dni       = Hubitat_dni
     state.subnetId     = subnetId
@@ -97,6 +104,8 @@ void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, loca
     state.token        = devtoken
     state.devId        = devId
     state.localHubIP   = localHubIP
+    // Apps before 1.3.0 pass the broker credentials here and have no getDeviceTokenFor()
+    if (clientSecret) state.legacyApp = true else state.remove("legacyApp")
     state.remove("clientId")       // broker credentials are only needed by the MQTT Listener
     state.remove("clientSecret")
     rememberState("devId", devId)
@@ -167,8 +176,10 @@ def getDevicestate() {
             token       : state.token
         ]
         def object = parent.pollAPI(request, state.name ?: "THSensor", state.type ?: "THSensor")
-        String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
-        if (latestToken && latestToken != state.token) state.token = latestToken
+        if (!legacyApp()) {
+            String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
+            if (latestToken && latestToken != state.token) state.token = latestToken
+        }
         if (object) {
             if (successful(object)) {
                 parseDevice(object)
@@ -444,12 +455,12 @@ private def convertCToPreferred(def tempC) {
 
 /* Offsets are temperature differences: scale by 9/5 for °F, no +32 */
 private def convertCDeltaToPreferred(def deltaC) {
-    try {
-        return parent?.convertTemperatureDelta(deltaC)
-    } catch (e) {
-        log.warn "parent.convertTemperatureDelta failed (${e}); using raw °C"
-        return deltaC
-    }
+    // Done here rather than in the app: apps older than 1.3.0 have no convertTemperatureDelta()
+    if (deltaC == null) return null
+    BigDecimal d
+    try { d = deltaC as BigDecimal } catch (e) { return null }
+    if (activeScale() == "C") return d
+    return (d * 9 / 5).toDouble().round(1)
 }
 
 /* === Alarm helpers === */
