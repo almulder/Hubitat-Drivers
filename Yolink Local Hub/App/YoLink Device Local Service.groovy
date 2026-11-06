@@ -12,6 +12,7 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expressed or implied. 
  * 
+ * 1.3.3 - The Finger driver (1.2.2) is published with the others and included in the outdated-driver check.
  * 1.3.2 - Warns when YoLink drivers are older than this app expects: a red notice at the top of the app's
  *         first page lists them with the fix (HPM Repair, then Done), and the same is logged once a day.
  * 1.3.1 - Works with an MQTT Listener driver older than 1.2.0: that Listener is given the broker credentials
@@ -37,7 +38,7 @@ import groovy.json.JsonOutput
 import java.net.URLEncoder
 import groovy.transform.Field
 
-private def get_APP_VERSION() {return "1.3.2"}
+private def get_APP_VERSION() {return "1.3.3"}
 private def copyright() {return "<br>© 2025-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved."}
 private def get_APP_NAME() {return "YoLink Device Local Service"}
 
@@ -530,7 +531,8 @@ String refreshDeviceTokenFor(String devId) {
     "YoLink LeakSensor Device Local"        : "1.2.2",
     "YoLink MotionSensor Device Local"      : "1.2.2",
     "YoLink PowerFailureAlarm Device Local" : "1.2.2",
-    "YoLink THSensor Device Local"          : "1.2.2"
+    "YoLink THSensor Device Local"          : "1.2.2",
+    "YoLink Finger Device Local"            : "1.2.2"
 ]
 
 private static int compareVersions(String a, String b) {
