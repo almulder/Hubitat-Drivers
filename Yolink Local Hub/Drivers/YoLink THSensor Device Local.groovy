@@ -2,6 +2,8 @@
  *  YoLink™ THSensor Device (Local API Edition)
  *  © 2025 Albert Mulder
  *  
+ *  1.2.2 - New appStatus attribute on the device page: shows what to do while the YoLink app is out of
+ *          date (HPM Repair, then Done in the app), and "OK" once it is current.
  *  1.2.1 - Works with YoLink app versions older than 1.3.0 again: if the app is older, the driver no longer
  *          calls getDeviceTokenFor() (which those apps lack), so polls keep working until the app is updated;
  *          the correction offset is converted in the driver instead of calling the app's convertTemperatureDelta().
@@ -18,7 +20,7 @@
 
 import groovy.json.JsonSlurper
 
-def clientVersion() { return "1.2.1"}
+def clientVersion() { return "1.2.2"}
 def copyright()     { return "© 2025 Albert Mulder" }
 def bold(t)         { return "<strong>$t</strong>" }
 def driverName()    { return "YoLink™ THSensor (Local API Edition)"}
@@ -54,6 +56,7 @@ metadata {
         attribute "firmware", "String"
         attribute "lastPoll", "String"
         attribute "lastResponse", "String"
+        attribute "appStatus", "String"      // "OK", or what to do when the YoLink app is out of date
         attribute "reportAt", "String"
         attribute "stateChangedAt", "String"
         attribute "state", "String"           // "normal" | "alert"
@@ -95,6 +98,12 @@ metadata {
 // True while the parent app is older than 1.3.0. Drivers before 1.2.0 kept the client secret in state,
 // so its presence marks a device the new app hasn't set up yet.
 private boolean legacyApp() { state.legacyApp || state.clientSecret }
+
+// Device-page status only; the MQTT Listener is the one that logs the warning
+private void updateAppStatus() {
+    String v = legacyApp() ? "YoLink app is older than 1.3.0, or has not been set up since the last update. Fix: in HPM run Repair on 'YoLink Local Hub Connector', then open the YoLink app and click Done." : "OK"
+    if (device.currentValue("appStatus") != v) sendEvent(name: "appStatus", value: v)
+}
 
 void ServiceSetup(Hubitat_dni, subnetId, devname, devtype, devtoken, devId, localHubIP=null, clientId=null, clientSecret=null) {
     state.my_dni       = Hubitat_dni
@@ -180,6 +189,7 @@ def getDevicestate() {
             String latestToken = parent.getDeviceTokenFor(state.devId?.toString())   // pollAPI may have refreshed it
             if (latestToken && latestToken != state.token) state.token = latestToken
         }
+        updateAppStatus()
         if (object) {
             if (successful(object)) {
                 parseDevice(object)

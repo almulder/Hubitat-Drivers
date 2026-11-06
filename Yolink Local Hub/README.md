@@ -107,6 +107,27 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 - Children now use the **YoLink `deviceId` as the DNI** (for reliable MQTT routing).  
   If you’re coming from older builds, the app will recreate devices with the new DNI automatically.
 
+### When the app and drivers don't match
+
+If HPM updates the drivers but not the app (common when the app was first installed by hand), or the other way
+round, everything keeps working, but you'll be told:
+
+- each YoLink device shows an **appStatus** line under Current States that says what to do (it reads `OK` when
+  everything matches), and the MQTT Listener logs the same warning once a day and after each hub restart;
+- the app shows a red notice at the top of its first page listing any outdated drivers, and logs it once a day.
+
+To fix it, update the code you already have. **Do not add a second YoLink app**: it would try to create its own
+copy of every device.
+
+1. In HPM, run **Match Up** so HPM links to the app and drivers already on your hub.
+2. Run **Repair** (or **Update**) on **YoLink Local Hub Connector**.
+3. Open the YoLink app (**Integrations**, or **Apps** on firmware before 2.5.0), check the version at the top of
+   the first page, and click through to **Done**.
+
+Without HPM: paste the new code into the existing **YoLink Device Local Service** entry under **Apps code** (and
+each driver under **Drivers code**), click **Save**, then open the app and click **Done**. If you end up with two
+YoLink entries under Apps code, delete the one no installed app uses.
+
 ---
 
 ## Troubleshooting
