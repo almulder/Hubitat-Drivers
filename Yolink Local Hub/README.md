@@ -25,6 +25,7 @@ This is an **App + drivers** that let Hubitat talk **directly** to the **YoLink 
 - Door Sensor
 - Power Failure Alarm (PFA)
 - Motion Sensor (Indoor / Outdoor)
+- Finger (Garage Door Controller 2): open/close/push, optional binding to a Door Sensor for door state
 - MQTT Listener “device” (handles the message bus)
 
 > More YoLink device types can be added if I can get my hands on them
