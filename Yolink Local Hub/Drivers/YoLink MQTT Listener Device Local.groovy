@@ -2,6 +2,9 @@
  *  YoLink™ MQTT Listener (Local API Edition)
  *  © 2025 Albert Mulder
  *
+ *  1.2.2 - New appStatus attribute on the device page shows what to do while the YoLink app is out of date
+ *          (HPM Repair, then Done in the app); the same warning is logged once a day and after each hub
+ *          restart until it is fixed.
  *  1.2.1 - Works with YoLink app versions older than 1.3.0 again: if the app passes the broker credentials
  *          (older apps do, and have no getMqttCredentials()), the listener keeps and uses them, so MQTT
  *          connects. They are removed as soon as app 1.3.0+ sets the listener up.
@@ -20,7 +23,7 @@ import groovy.json.JsonSlurper
 import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 
-def clientVersion() { "1.2.1" }
+def clientVersion() { "1.2.2" }
 def copyright()     { "© 2025 Albert Mulder" }
 def driverName()    { "YoLink™ MQTT Listener (Local API Edition)" }
 
@@ -60,6 +63,7 @@ metadata {
         attribute "lastPoll", "String"
         attribute "MQTT", "String"
         attribute "lastResponse", "String"
+        attribute "appStatus", "String"      // "OK", or what to do when the YoLink app is out of date
     }
 }
 
@@ -137,6 +141,8 @@ def updated() {
 def initialize() {
     log.trace "Initializing: Establishing MQTT connection to YoLink Local API"
     cleanupLegacyState()
+    state.remove("appWarnDay")   // warn again after a restart
+    checkAppStatus()
     state.reconnectDelay = RECONNECT_MIN_SECS
     connect()
     runEvery1Minute(mqttWatchdog)
@@ -186,6 +192,19 @@ def pollDevice(delay=1) {
 
 def logDebug(msg) {
     if (state.debug) log.debug "[${timestamp()}] ${msg}"
+}
+
+// Credentials in state mean the app is older than 1.3.0 (or hasn't run setup since being updated).
+// Shown on the device page, and logged once a day and after every hub restart, until that is fixed.
+private void checkAppStatus() {
+    boolean old = state.clientSecret as boolean
+    String v = old ? "YoLink app is older than 1.3.0, or has not been set up since the last update. Fix: in HPM run Repair on 'YoLink Local Hub Connector', then open the YoLink app and click Done." : "OK"
+    if (device.currentValue("appStatus") != v) sendEvent(name: "appStatus", value: v)
+    String today = new Date().format("yyyy-MM-dd", location.timeZone)
+    if (old && state.appWarnDay != today) {
+        state.appWarnDay = today
+        log.warn "${device.displayName}: ${v}"
+    }
 }
 
 private Map creds() {
@@ -419,6 +438,7 @@ private String fmtTs(def ts) {
 }
 
 def mqttWatchdog() {
+    checkAppStatus()
     def connected = interfaces.mqtt.isConnected()
     if (!connected) {
         Long next = state.nextReconnectAt as Long

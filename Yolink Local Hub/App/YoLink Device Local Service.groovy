@@ -12,6 +12,8 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expressed or implied. 
  * 
+ * 1.3.2 - Warns when YoLink drivers are older than this app expects: a red notice at the top of the app's
+ *         first page lists them with the fix (HPM Repair, then Done), and the same is logged once a day.
  * 1.3.1 - Works with an MQTT Listener driver older than 1.2.0: that Listener is given the broker credentials
  *         again during setup, so MQTT keeps connecting if the app is updated before the drivers.
  * 1.3.0 - The app now appears under Integrations in the Hubitat sidebar instead of Apps (platform 2.5.0+;
@@ -35,7 +37,7 @@ import groovy.json.JsonOutput
 import java.net.URLEncoder
 import groovy.transform.Field
 
-private def get_APP_VERSION() {return "1.3.1"}
+private def get_APP_VERSION() {return "1.3.2"}
 private def copyright() {return "<br>© 2025-" + new Date().format("yyyy") + " Albert Mulder. All rights reserved."}
 private def get_APP_NAME() {return "YoLink Device Local Service"}
 
@@ -72,6 +74,8 @@ String errData
 
 def about() {
     dynamicPage(name: "about", title: pageTitle("About"), uninstall: true) {
+        List<String> outdated = outdatedDrivers()
+        if (outdated) section("") { paragraph boldRedTitle(outdatedDriversMessage(outdated)) }
         section("") {
             paragraph "<img src='${getImagePath()}yolink.png' alt='YoLink' style='max-width: 15%; height: auto;'/>"
             paragraph boldTitle("${get_APP_NAME()} - Version ${get_APP_VERSION()}")
@@ -440,6 +444,8 @@ def initialize() {
 
     scheduleReconcile()
     runIn(3, "runImmediateReconcile")
+    schedule("0 0 9 * * ?", "dailyVersionCheck")   // 09:00 hub local time
+    runIn(60, "dailyVersionCheck")
 }
 
 void debugOff() {
@@ -516,6 +522,51 @@ String refreshDeviceTokenFor(String devId) {
 
 // Listener drivers before 1.2.0 never call getMqttCredentials(), so they still need the credentials
 // passed to ServiceSetup. Every Listener version has clientVersion().
+// Driver versions released alongside this app. Only drivers listed here are checked; every version
+// of these has clientVersion().
+@Field static final Map<String, String> EXPECTED_DRIVER_VERSIONS = [
+    "YoLink MQTT Listener Device Local"     : "1.2.2",
+    "YoLink DoorSensor Device Local"        : "1.2.2",
+    "YoLink LeakSensor Device Local"        : "1.2.2",
+    "YoLink MotionSensor Device Local"      : "1.2.2",
+    "YoLink PowerFailureAlarm Device Local" : "1.2.2",
+    "YoLink THSensor Device Local"          : "1.2.2"
+]
+
+private static int compareVersions(String a, String b) {
+    List<Integer> x = (a ?: "0").tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 }
+    List<Integer> y = (b ?: "0").tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 }
+    for (int i = 0; i < Math.max(x.size(), y.size()); i++) {
+        int d = (i < x.size() ? x[i] : 0) - (i < y.size() ? y[i] : 0)
+        if (d != 0) return d
+    }
+    return 0
+}
+
+// One entry per installed driver older than EXPECTED_DRIVER_VERSIONS, e.g. "YoLink THSensor Device Local 1.2.0"
+List<String> outdatedDrivers() {
+    Map<String, String> found = [:]
+    getChildDevices().each { dev ->
+        String want = EXPECTED_DRIVER_VERSIONS[dev.typeName]
+        if (!want || found.containsKey(dev.typeName)) return
+        String have
+        try { have = dev.clientVersion()?.toString() } catch (Exception e) { have = "unknown" }
+        if (have == "unknown" || compareVersions(have, want) < 0) found[dev.typeName] = have
+    }
+    return found.collect { k, v -> "${k} ${v}".toString() }
+}
+
+String outdatedDriversMessage(List<String> outdated) {
+    return "These YoLink drivers are older than app ${get_APP_VERSION()} expects: ${outdated.join(', ')}. " +
+           "Fix: in HPM run Repair on 'YoLink Local Hub Connector', then open this app and click Done."
+}
+
+// Scheduled daily and run shortly after setup/hub restart
+void dailyVersionCheck() {
+    List<String> outdated = outdatedDrivers()
+    if (outdated) log.warn outdatedDriversMessage(outdated)
+}
+
 private boolean listenerNeedsCreds(dev) {
     try {
         List<Integer> v = (dev.clientVersion()?.toString() ?: "0").tokenize(".").collect { it.isInteger() ? it.toInteger() : 0 }
