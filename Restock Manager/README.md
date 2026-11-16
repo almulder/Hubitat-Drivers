@@ -90,7 +90,7 @@ Changing an item's link, mode, SKU or watched text starts it fresh, so it can al
 
 If a max price is set and the store shows the item in stock but its price can't be read, the item shows **In stock, price unreadable**. It doesn't alert and doesn't reset (no reset message, reminders stay as they were) until a readable price comes back.
 
-For products with several variants (sizes, colours) and no SKU filter, the lowest-priced variant that's in stock under your max answers, so the result stays the same from check to check.
+For products with several variants (sizes, colours), paste the link to the variant you want (most stores add `?id=...` or `?variant=...` to the link when you pick one) and that variant is watched. Without a variant in the link and no SKU filter, the lowest-priced variant that's in stock under your max answers, so the result stays the same from check to check.
 
 ---
 
@@ -115,6 +115,7 @@ For products with several variants (sizes, colours) and no SKU filter, the lowes
 
 ## Version history
 
+- **0.1.2**: A link to a specific variant (for example a store link ending in `?id=...` or `?variant=...`) now watches that variant, not the cheapest one in stock. **Verify** fills in that variant's name and SKU. If an item was already set up from such a link and picked the wrong variant, open it, press **Verify link & read info**, then **Done**.
 - **0.1.1**: Fixed a repeat in-stock alert after the first Done on a new item, and alerts repeating when one notification device fails. "Possibly in stock" is now opt-in, and an unreadable price no longer counts as under your max. Better handling of product variants, SKU filtering, prices like 1.299,00 and ranges, and HTML entities. The test button no longer turns on switches. Debug logging defaults off and turns itself off after 30 minutes. Large item lists are always checked within the polling interval, and the daily run no longer doubles up with the regular check. Prices like 1.299 and 1 299,00 now read as thousands.
   - **Upgrading from 0.1.0:**
     - **Re-check your max prices.** The old parser could auto-fill a wrong max price from prices written with a decimal comma (for example 1.299 from "1.299,00").
