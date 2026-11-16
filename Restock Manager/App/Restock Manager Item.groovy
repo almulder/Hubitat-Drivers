@@ -35,11 +35,14 @@
  *          qualifying variant) and honours the "possibly in stock" setting. Prices like
  *          1.299 and 1 299,00 read as thousands; more currency entities are decoded; the page
  *          is only stripped to text when that's actually needed.
+ *  0.1.2 - A link that names a variant (?id=, ?variant=, ?sku=) now watches that variant instead of
+ *          the cheapest in-stock one. Verify fills in that variant's name and SKU, replacing an SKU
+ *          and a name that Verify filled in earlier (a name you typed is kept).
  */
 import groovy.json.JsonSlurper
 import groovy.transform.Field
 
-@Field static final String APP_VERSION = "0.1.1"
+@Field static final String APP_VERSION = "0.1.2"
 @Field static final List IN_STOCK = ["InStock", "LimitedAvailability"]
 @Field static final String PRODUCT_ALERT = "%name% is in stock for \$%price%. %url%"
 @Field static final String TEXT_ALERT    = "%name%: %status%. %url%"
@@ -270,16 +273,22 @@ private void verifyLinkNow() {
     }
 
     boolean newUrl = state.verifiedUrl != productUrl
-    // On a new link, ignore any old SKU filter so we read the page's main product.
-    Map r = parseProduct(html, newUrl ? "" : normalize(skuMatch), null)
+    // On a new link, or a link that names a variant, ignore any old SKU filter so we read
+    // the page's main product (or the variant the link names).
+    boolean urlVariant = !urlVariantParams(productUrl).isEmpty()
+    String oldAutoName = state.verify?.name
+    Map r = parseProduct(html, (newUrl || urlVariant) ? "" : normalize(skuMatch), null)
     String title = pageTitle(html)
     String vis = r.found ? null : visibleText(html)
 
     if (r.found) {
-        setVerify([type: "product", name: r.name, price: r.price, status: r.status, title: title])
+        setVerify([type: "product", name: r.name, price: r.price, status: r.status, title: title,
+                   urlMatch: r.urlMatch == true])
         if (newUrl || watchType == null) app.updateSetting("watchType", [value: "product", type: "enum"])
-        if (r.name && (newUrl || !itemName)) app.updateSetting("itemName", [value: r.name, type: "text"])
-        if (r.sku && (newUrl || !skuMatch)) app.updateSetting("skuMatch", [value: r.sku, type: "text"])
+        // The link's variant replaces a name that Verify filled in earlier, but not one you typed.
+        boolean replaceName = newUrl || !itemName || (r.urlMatch && oldAutoName && itemName == oldAutoName)
+        if (r.name && replaceName) app.updateSetting("itemName", [value: r.name, type: "text"])
+        if (r.sku && (newUrl || !skuMatch || r.urlMatch)) app.updateSetting("skuMatch", [value: r.sku, type: "text"])
         if (r.price != null && newUrl) app.updateSetting("maxPrice", [value: r.price, type: "decimal"])
     } else if (looksBlocked(vis)) {
         setVerify([error: "The site returned a block, CAPTCHA, or near-empty page, so the hub can't read it. This site probably won't work."])
@@ -304,7 +313,8 @@ private String verifySummary() {
     if (v.error) return "<b>⚠ ${v.error}</b>"
     if (v.type == "product") {
         String price = v.price != null ? "\$${fmtPrice(v.price)}" : "not shown"
-        return "<b>✓ Found product data</b><br>Name: ${v.name ?: v.title ?: 'unknown'}<br>Price: ${price}<br>" +
+        String which = v.urlMatch ? " (the variant in your link)" : ""
+        return "<b>✓ Found product data${which}</b><br>Name: ${v.name ?: v.title ?: 'unknown'}<br>Price: ${price}<br>" +
                "Status: ${humanStatus(v.status)}<br>Fields below were filled in from this page; change any of them to override."
     }
     String s = "<b>No product data on this page</b>, so it's set up to watch for text instead.<br>Page title: ${v.title ?: 'none'}"
@@ -553,8 +563,12 @@ private void processText(String vis) {
 // only if the no-stock-status fallback needs it.
 private Map parseProduct(String html, String needle, String vis) {
     Map found = null
+    // A link that names a variant (?id=, ?variant=, ...) picks that variant when the page has it.
+    Map ids = urlVariantParams(productUrl)
 
-    // 1) schema.org JSON-LD
+    // 1) schema.org JSON-LD. Without a variant in the link the first product wins; with one,
+    //    keep looking for the product that matches it, falling back to the first.
+    Map first = null
     def slurper = new JsonSlurper()
     def m = (html =~ /(?is)<script[^>]*application\/ld\+json[^>]*>(.*?)<\/script>/)
     while (!found && m.find()) {
@@ -568,10 +582,16 @@ private Map parseProduct(String html, String needle, String vis) {
                      ((json instanceof Map && json["@graph"]) ? (json["@graph"] instanceof List ? json["@graph"] : [json["@graph"]]) : [json])
         for (item in items) {
             if (!(item instanceof Map)) continue
-            found = productFrom((Map) item, needle)
-            if (found) break
+            Map f = productFrom((Map) item, needle, ids)
+            if (!f) continue
+            if (!first) first = f
+            if (!ids || f.urlMatch) {
+                found = f
+                break
+            }
         }
     }
+    if (!found) found = first
 
     // 2) Open Graph / product meta tags and microdata (only scanned when JSON-LD left gaps)
     if (found && found.price != null && found.status) return found
@@ -600,12 +620,13 @@ private Map parseProduct(String html, String needle, String vis) {
 }
 
 // One JSON-LD item -> product result, or null. A product group with variants answers from
-// its variants, falling back to its own offer. See pickVariant for which variant wins.
-private Map productFrom(Map item, String needle) {
+// its variants, falling back to its own offer. The variant named in the link wins; otherwise
+// see pickVariant.
+private Map productFrom(Map item, String needle, Map ids) {
     List variants = (item.hasVariant instanceof List) ? item.hasVariant.findAll { it instanceof Map } : []
     if (variants) {
-        List hits = variants.collect { productFrom((Map) it, needle) }.findAll { it }
-        if (hits) return pickVariant(hits)
+        List hits = variants.collect { productFrom((Map) it, needle, ids) }.findAll { it }
+        if (hits) return hits.find { it.urlMatch } ?: pickVariant(hits)
     }
     String type = item["@type"]?.toString() ?: ""
     if (!type.contains("Product")) return null
@@ -615,9 +636,41 @@ private Map productFrom(Map item, String needle) {
     Map offer = pickOffer(item.offers)
     if (!offer && variants) return null   // product group with no usable variant or offer
     def priceRaw = offer ? firstPresent([offer.price, offer.lowPrice, specPrice(offer.priceSpecification)]) : null
-    return [found : true, name: name, sku: sku,
-            price : parsePrice(priceRaw),
-            status: normalizeAvail(offer?.availability?.toString())]
+    return [found   : true, name: name, sku: sku,
+            price   : parsePrice(priceRaw),
+            status  : normalizeAvail(offer?.availability?.toString()),
+            urlMatch: urlVariantMatch(sku, offer?.url ?: item.url, ids)]
+}
+
+@Field static final List VARIANT_PARAMS = ["variant", "id", "sku", "skuid", "variantid"]
+
+// The variant-looking query parameters of a link, e.g. [id: "794121815617216512"] for
+// .../products/x?id=794121815617216512, or [variant: "4123"] for Shopify's ?variant=4123.
+private Map urlVariantParams(String url) {
+    Map out = [:]
+    int q = (url ?: "").indexOf("?")
+    if (q < 0) return out
+    String qs = url.substring(q + 1)
+    int hash = qs.indexOf("#")
+    if (hash >= 0) qs = qs.substring(0, hash)
+    qs.tokenize("&").each { String p ->
+        int eq = p.indexOf("=")
+        if (eq <= 0) return
+        String k = p.substring(0, eq).toLowerCase()
+        String v = p.substring(eq + 1).trim()
+        if (k in VARIANT_PARAMS && v) out[k] = v
+    }
+    return out
+}
+
+// True when this product is the one the link names: its SKU equals one of the link's variant
+// values, or its offer URL carries the same variant parameter (key and value).
+private boolean urlVariantMatch(String sku, def offerUrl, Map ids) {
+    if (!ids) return false
+    String s = normalize(sku)
+    if (s && ids.values().any { normalize(it) == s }) return true
+    Map o = urlVariantParams(offerUrl?.toString())
+    return o.any { k, v -> ids[k] == v }
 }
 
 // Prefer the lowest-priced variant that's in stock and under the max, then the lowest-priced
